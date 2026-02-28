@@ -70,8 +70,8 @@ jobs:
               - 如果没有严重问题（只有 LOW/MEDIUM 或无问题）：执行 `echo 'PASS' > /tmp/review-result.txt`
 
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-            --max-turns 10
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(echo * > /tmp/review-result.txt)"
+            --max-turns 20
       - name: 检查 Review 结果
         run: |
           if [ -f /tmp/review-result.txt ] && grep -q "FAIL" /tmp/review-result.txt; then
