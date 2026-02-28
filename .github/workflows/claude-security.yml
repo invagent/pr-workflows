@@ -1,0 +1,63 @@
+# .github/workflows/claude-security.yml
+name: Claude Security Review
+
+on:
+  workflow_call:           # 关键：声明这是可复用工作流
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      ANTHROPIC_BASE_URL:
+        required: false
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Claude Security Review
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            这个 PR 修改了安全敏感的代码，请进行深度安全审查。
+
+            ## OWASP Top 10 检查清单
+            - [ ] SQL 注入（SQL Injection）
+            - [ ] 跨站脚本攻击（XSS）
+            - [ ] 认证授权缺陷（Broken Authentication/Access Control）
+            - [ ] 敏感数据暴露（Sensitive Data Exposure）
+            - [ ] 安全配置错误（Security Misconfiguration）
+            - [ ] 跨站请求伪造（CSRF）
+            - [ ] 使用含已知漏洞的组件
+            - [ ] 日志和监控不足
+
+            ## 额外检查
+            - [ ] 硬编码的密钥、Token、密码
+            - [ ] 不安全的加密算法
+            - [ ] 服务端请求伪造（SSRF）
+            - [ ] 竞态条件（Race Condition）
+            - [ ] 输入验证和过滤是否完整
+
+            对每个发现的安全问题，请标注：
+            - 严重等级：CRITICAL / HIGH / MEDIUM / LOW
+            - 具体位置（使用 inline comment）
+            - 修复建议
+
+            请用中文给出报告。
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*)"
+            --max-turns 8

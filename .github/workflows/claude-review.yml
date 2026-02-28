@@ -1,0 +1,66 @@
+# .github/workflows/claude-review.yml
+name: Claude Auto Review
+
+on:
+  workflow_call:           # 关键：声明这是可复用工作流
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      ANTHROPIC_BASE_URL:
+        required: false
+
+jobs:
+  review:
+    # 跳过 Draft PR（可选，去掉这行则 Draft 也会触发）
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR TITLE: ${{ github.event.pull_request.title }}
+            AUTHOR: ${{ github.event.pull_request.user.login }}
+
+            请对这个 Pull Request 进行全面的代码审查，重点关注：
+
+            ## 代码质量
+            - 代码逻辑是否正确，有无潜在 bug
+            - 代码可读性和可维护性
+            - 是否遵循项目已有的代码风格和规范
+            - 是否有重复代码，是否可以复用已有逻辑
+
+            ## 安全性
+            - 有无 SQL 注入、XSS 等常见安全漏洞
+            - 敏感信息（密码、Token）是否有硬编码
+            - 权限校验是否完整
+
+            ## 性能
+            - 有无明显的性能问题（如 N+1 查询、不必要的循环）
+            - 大数据量处理是否合理
+
+            ## 测试
+            - 是否包含必要的单元测试
+            - 关键逻辑是否有测试覆盖
+
+            请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
+            对于整体评价，使用 `gh pr comment` 添加总结性评论。
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --max-turns 10
