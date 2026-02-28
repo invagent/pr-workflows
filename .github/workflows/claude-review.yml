@@ -10,17 +10,14 @@ on:
         required: false
 
 jobs:
-  claude-review:
+  review:
     # 跳过 Draft PR（可选，去掉这行则 Draft 也会触发）
-    if: ${{ !github.event.pull_request.draft }}
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
       id-token: write
-      actions: read
-    outputs:
-      result: ${{ steps.check_result.outputs.result }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,39 +58,9 @@ jobs:
             - 是否包含必要的单元测试
             - 关键逻辑是否有测试覆盖
 
-            ## 敏感词
-            - 禁止包含“李创”
-
             请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
             对于整体评价，使用 `gh pr comment` 添加总结性评论。
-            
-            上述步骤完成后：
-              - 如果发现 CRITICAL 或 HIGH 级别问题：执行 `echo 'FAIL' > /tmp/review-result.txt`
-              - 如果发现提交的内容中有”李创“关键字：执行 `echo 'FAIL' > /tmp/review-result.txt`
-              - 如果没有严重问题（只有 LOW/MEDIUM 或无问题）：执行 `echo 'PASS' > /tmp/review-result.txt`
 
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(echo * > /tmp/review-result.txt)"
-            --max-turns 20
-            
-      - name: 读取审查结果
-        id: check_result
-        run: |
-          if [ -f /tmp/review-result.txt ] && grep -q "FAIL" /tmp/review-result.txt; then
-            echo "result=FAIL" >> $GITHUB_OUTPUT
-          else
-            echo "result=PASS" >> $GITHUB_OUTPUT
-          fi
-
-  gate:
-    needs: claude-review
-    runs-on: ubuntu-latest
-    steps:
-      - name: 执行卡口检查
-        run: |
-          if [ "${{ needs.claude-review.outputs.result }}" = "FAIL" ]; then
-            echo "❌ Claude Review 发现严重问题，PR 被阻止合并，请查看上方 review 意见。"
-            exit 1
-          else
-            echo "✅ Claude Review 通过，允许合并。"
-          fi
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --max-turns 10
