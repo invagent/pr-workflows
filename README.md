@@ -23,16 +23,14 @@
 
 ## 接入方式
 
-### 第一步：配置 Secrets
+Secrets 已在组织层面统一配置，子项目无需重复设置。如需使用独立的 API 密钥，在子项目仓库的 **Settings → Secrets and variables → Actions** 中覆盖以下变量即可：
 
-在子项目仓库的 **Settings → Secrets and variables → Actions** 中添加：
+| 密钥 | 说明 |
+|------|------|
+| `ANTHROPIC_API_KEY` | Anthropic API 访问密钥 |
+| `ANTHROPIC_BASE_URL` | 自定义 API 端点（使用代理时填写） |
 
-| 密钥 | 是否必填 | 说明 |
-|------|---------|------|
-| `ANTHROPIC_API_KEY` | 必填 | Anthropic API 访问密钥 |
-| `ANTHROPIC_BASE_URL` | 选填 | 自定义 API 端点（使用代理时填写） |
-
-### 第二步：创建工作流文件
+### 创建工作流文件
 
 在子项目 `.github/workflows/` 下按需创建以下文件：
 
