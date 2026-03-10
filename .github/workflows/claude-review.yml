@@ -27,7 +27,7 @@ jobs:
       - name: Check for project-level standards
         id: check-standards
         run: |
-          if ls .github/standards/*.md 2>/dev/null | head -1 > /dev/null; then
+          if compgen -G ".github/standards/*.md" > /dev/null 2>&1; then
             echo "source=local" >> "$GITHUB_OUTPUT"
           else
             echo "source=shared" >> "$GITHUB_OUTPUT"
