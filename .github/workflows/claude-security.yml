@@ -22,6 +22,45 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Check for project-level standards
+        id: check-standards
+        run: |
+          if ls .github/standards/*.md 2>/dev/null | head -1 > /dev/null; then
+            echo "source=local" >> "$GITHUB_OUTPUT"
+          else
+            echo "source=shared" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout shared standards
+        if: steps.check-standards.outputs.source == 'shared'
+        uses: actions/checkout@v4
+        with:
+          repository: invagent/pr-workflows
+          path: .shared-standards
+          fetch-depth: 1
+          sparse-checkout: |
+            standards
+
+      - name: Load standards
+        id: standards
+        run: |
+          if [ "${{ steps.check-standards.outputs.source }}" == "local" ]; then
+            DIR=".github/standards"
+          else
+            DIR=".shared-standards/standards"
+          fi
+          {
+            echo 'content<<STANDARDS_EOF'
+            for f in "$DIR"/*.md; do
+              [ -f "$f" ] || continue
+              echo "---"
+              echo "# $(basename "$f" .md)"
+              cat "$f"
+              echo ""
+            done
+            echo 'STANDARDS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Claude Security Review
         uses: anthropics/claude-code-action@v1
         env:
@@ -50,6 +89,9 @@ jobs:
             - [ ] 服务端请求伪造（SSRF）
             - [ ] 竞态条件（Race Condition）
             - [ ] 输入验证和过滤是否完整
+
+            ## 公司代码规范
+            ${{ steps.standards.outputs.content }}
 
             对每个发现的安全问题，请标注：
             - 严重等级：CRITICAL / HIGH / MEDIUM / LOW
