@@ -45,7 +45,7 @@ on:
 
 jobs:
   review:
-    uses: invagent/pr-workflows/.github/workflows/claude-review.yml@main
+    uses: invagent/pr-workflows/.github/workflows/claude-review.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -68,7 +68,7 @@ on:
 
 jobs:
   security:
-    uses: invagent/pr-workflows/.github/workflows/claude-security.yml@main
+    uses: invagent/pr-workflows/.github/workflows/claude-security.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -91,7 +91,7 @@ on:
 
 jobs:
   claude:
-    uses: invagent/pr-workflows/.github/workflows/claude.yml@main
+    uses: invagent/pr-workflows/.github/workflows/claude.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
