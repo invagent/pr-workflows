@@ -103,5 +103,5 @@ jobs:
             对于整体评价，使用 `gh pr comment` 添加总结性评论。
 
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Read,Glob,Grep"
+            --dangerouslyAllowAllTools
             --max-turns 30
