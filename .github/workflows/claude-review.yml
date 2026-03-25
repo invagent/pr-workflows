@@ -33,8 +33,17 @@ jobs:
             echo "source=shared" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Detect Java project
+        id: detect-java
+        run: |
+          if find . -name "*.java" -not -path "./.git/*" | head -1 | grep -q "."; then
+            echo "is_java=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_java=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout shared standards
-        if: steps.check-standards.outputs.source == 'shared'
+        if: steps.check-standards.outputs.source == 'shared' && steps.detect-java.outputs.is_java == 'true'
         uses: actions/checkout@v4
         with:
           repository: invagent/pr-workflows
@@ -46,10 +55,15 @@ jobs:
       - name: Resolve standards path
         id: standards
         run: |
-          if [ "${{ steps.check-standards.outputs.source }}" == "local" ]; then
+          if [ "${{ steps.detect-java.outputs.is_java }}" != "true" ]; then
+            echo "dir=" >> "$GITHUB_OUTPUT"
+            echo "hint=请遵循该语言的通用最佳实践进行审查，无需加载额外规范文件。" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.check-standards.outputs.source }}" == "local" ]; then
             echo "dir=.github/standards" >> "$GITHUB_OUTPUT"
+            echo "hint=这是一个 Java 项目，规范文件位于 \`.github/standards/\` 目录，请用 Read 工具读取其中的 .md 文件，审查时对照执行。" >> "$GITHUB_OUTPUT"
           else
             echo "dir=.shared-standards/standards" >> "$GITHUB_OUTPUT"
+            echo "hint=这是一个 Java 项目，规范文件位于 \`.shared-standards/standards/\` 目录，请用 Read 工具读取其中的 .md 文件，审查时对照执行。" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Claude Code Review
@@ -86,7 +100,7 @@ jobs:
             - 关键逻辑是否有测试覆盖
 
             ## 公司代码规范
-            规范文件位于 `${{ steps.standards.outputs.dir }}/` 目录，请用 Read 工具读取其中的 .md 文件，审查时对照执行。
+            ${{ steps.standards.outputs.hint }}
 
             请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
             对于整体评价，使用 `gh pr comment` 添加总结性评论。
