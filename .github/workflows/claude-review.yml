@@ -43,25 +43,14 @@ jobs:
           sparse-checkout: |
             standards
 
-      - name: Load standards
+      - name: Resolve standards path
         id: standards
         run: |
           if [ "${{ steps.check-standards.outputs.source }}" == "local" ]; then
-            DIR=".github/standards"
+            echo "dir=.github/standards" >> "$GITHUB_OUTPUT"
           else
-            DIR=".shared-standards/standards"
+            echo "dir=.shared-standards/standards" >> "$GITHUB_OUTPUT"
           fi
-          {
-            echo 'content<<STANDARDS_EOF'
-            for f in "$DIR"/*.md; do
-              [ -f "$f" ] || continue
-              echo "---"
-              echo "# $(basename "$f" .md)"
-              cat "$f"
-              echo ""
-            done
-            echo 'STANDARDS_EOF'
-          } >> "$GITHUB_OUTPUT"
 
       - name: Claude Code Review
         uses: anthropics/claude-code-action@v1
@@ -97,11 +86,11 @@ jobs:
             - 关键逻辑是否有测试覆盖
 
             ## 公司代码规范
-            ${{ steps.standards.outputs.content }}
+            规范文件位于 `${{ steps.standards.outputs.dir }}/` 目录，请用 Read 工具读取其中的 .md 文件，审查时对照执行。
 
             请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
             对于整体评价，使用 `gh pr comment` 添加总结性评论。
 
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
-            --max-turns 30
+            --max-turns 20

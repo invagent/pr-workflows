@@ -41,25 +41,14 @@ jobs:
           sparse-checkout: |
             standards
 
-      - name: Load standards
+      - name: Resolve standards path
         id: standards
         run: |
           if [ "${{ steps.check-standards.outputs.source }}" == "local" ]; then
-            DIR=".github/standards"
+            echo "dir=.github/standards" >> "$GITHUB_OUTPUT"
           else
-            DIR=".shared-standards/standards"
+            echo "dir=.shared-standards/standards" >> "$GITHUB_OUTPUT"
           fi
-          {
-            echo 'content<<STANDARDS_EOF'
-            for f in "$DIR"/*.md; do
-              [ -f "$f" ] || continue
-              echo "---"
-              echo "# $(basename "$f" .md)"
-              cat "$f"
-              echo ""
-            done
-            echo 'STANDARDS_EOF'
-          } >> "$GITHUB_OUTPUT"
 
       - name: Claude Security Review
         uses: anthropics/claude-code-action@v1
@@ -91,7 +80,7 @@ jobs:
             - [ ] 输入验证和过滤是否完整
 
             ## 公司代码规范
-            ${{ steps.standards.outputs.content }}
+            规范文件位于 `${{ steps.standards.outputs.dir }}/` 目录，请用 Read 工具读取其中的 .md 文件，审查时对照执行。
 
             对每个发现的安全问题，请标注：
             - 严重等级：CRITICAL / HIGH / MEDIUM / LOW
@@ -101,5 +90,5 @@ jobs:
             请用中文给出报告。
 
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*)"
-            --max-turns 8
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
+            --max-turns 15
