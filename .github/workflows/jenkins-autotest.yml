@@ -1,0 +1,92 @@
+# .github/workflows/jenkins-autotest.yml
+name: Trigger Jenkins Autotest
+
+on:
+  workflow_call:
+    inputs:
+      run_mode:
+        description: 'Jenkins RUN_MODE 参数'
+        required: true
+        type: string
+      issue_mode:
+        description: 'Jenkins ISSUE_MODE 参数'
+        required: true
+        type: string
+      issue_type:
+        description: 'Jenkins ISSUE_TYPE 参数'
+        required: true
+        type: string
+    secrets:
+      JENKINS_URL:
+        required: true
+      JENKINS_USER:
+        required: true
+      JENKINS_API_TOKEN:
+        required: true
+      JENKINS_PIPELINE_TOKEN:
+        required: true
+
+jobs:
+  trigger-autotest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger and wait for autotest build
+        run: |
+          AUTH="${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}"
+          BUILD_API="${{ secrets.JENKINS_URL }}/cicd-build"
+
+          # 触发前记录当前构建号
+          BEFORE=$(curl -sf -u "$AUTH" "$BUILD_API/lastBuild/api/json?tree=number" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
+          echo "Current build number before trigger: $BEFORE"
+
+          # 触发构建
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST -u "$AUTH" \
+            "${{ secrets.JENKINS_URL }}/cicd-build/buildWithParameters?token=${{ secrets.JENKINS_PIPELINE_TOKEN }}&SERVICE=at-automated-test&RUN_MODE=${{ inputs.run_mode }}&ISSUE_MODE=${{ inputs.issue_mode }}&ISSUE_TYPE=${{ inputs.issue_type }}")
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Failed to trigger autotest build (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          echo "Autotest build triggered (HTTP $HTTP_CODE), waiting for build to start..."
+
+          # 等待新构建号出现（最多等 2 分钟）
+          BUILD_NUM=""
+          for i in $(seq 1 12); do
+            sleep 10
+            CURRENT=$(curl -sf -u "$AUTH" "$BUILD_API/lastBuild/api/json?tree=number" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
+            if [ "$CURRENT" -gt "$BEFORE" ]; then
+              BUILD_NUM=$CURRENT
+              echo "Autotest build #$BUILD_NUM started"
+              break
+            fi
+          done
+
+          if [ -z "$BUILD_NUM" ]; then
+            echo "Timed out waiting for autotest build to start"
+            exit 1
+          fi
+
+          # 轮询构建结果（最多等 30 分钟）
+          echo "Polling autotest build #$BUILD_NUM result..."
+          for i in $(seq 1 30); do
+            sleep 60
+            RESP=$(curl -sf -u "$AUTH" "$BUILD_API/$BUILD_NUM/api/json?tree=building,result,url" 2>/dev/null || echo "{}")
+            BUILDING=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('building', True))" 2>/dev/null || echo "True")
+            RESULT=$(echo "$RESP"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('result', ''))"  2>/dev/null || echo "")
+            URL=$(echo "$RESP"     | python3 -c "import sys,json; print(json.load(sys.stdin).get('url', ''))"     2>/dev/null || echo "")
+
+            if [ "$BUILDING" = "False" ]; then
+              echo "Autotest build #$BUILD_NUM finished: $RESULT"
+              echo "Details: $URL"
+              if [ "$RESULT" = "SUCCESS" ]; then
+                exit 0
+              else
+                exit 1
+              fi
+            fi
+            echo "Still running... ($((i))min elapsed)"
+          done
+
+          echo "Timed out waiting for autotest result (30 min)"
+          exit 1

@@ -1,6 +1,6 @@
 # pr-workflows
 
-基于 Claude AI 的 GitHub Actions 可复用工作流库，为团队所有项目提供统一的 PR 自动化审查能力。
+基于 Claude AI 的 GitHub Actions 可复用工作流库，为团队所有项目提供统一的 PR 自动化审查与 CI/CD 能力。
 
 ## 包含的工作流
 
@@ -8,7 +8,10 @@
 |--------|---------|------|
 | `claude-review.yml` | PR 创建、代码更新、标记 Ready（跳过 Draft） | 全量代码审查，覆盖代码质量、安全性、性能、测试 |
 | `claude-security.yml` | PR 涉及敏感路径变更 | 深度安全审查，对照 OWASP Top 10 逐项检查 |
+| `claude-ontology-review.yml` | PR 创建、代码更新、标记 Ready（仅 Java 项目） | 本体设计与代码实现一致性审核，审核完成后云之家通知 PR 作者 |
 | `claude.yml` | Issue 或 PR 评论中包含 `@claude` | AI 实时交互，支持代码解释、方案讨论等 |
+| `jenkins-deploy.yml` | push to test 分支 | 触发 Jenkins 部署构建并等待结果 |
+| `jenkins-autotest.yml` | 通常由 jenkins-deploy.yml 串联触发 | 触发 Jenkins 自动化测试并等待结果 |
 
 审查结果以中文输出，具体问题通过 inline comment 标注到代码行，整体评价通过 PR comment 汇总。
 
@@ -29,6 +32,12 @@ Secrets 已在组织层面统一配置，子项目无需重复设置。如需使
 |------|------|
 | `ANTHROPIC_API_KEY` | Anthropic API 访问密钥 |
 | `ANTHROPIC_BASE_URL` | 自定义 API 端点（使用代理时填写） |
+| `YUNZHIJIA_NOTIFY_URL` | 云之家通知接口地址 |
+| `YUNZHIJIA_ACCESS_TOKEN` | 云之家通知 Token |
+| `JENKINS_URL` | Jenkins 代理地址 |
+| `JENKINS_USER` | Jenkins 用户名 |
+| `JENKINS_API_TOKEN` | Jenkins API Token |
+| `JENKINS_PIPELINE_TOKEN` | 流水线触发 Token |
 
 ### 创建工作流文件
 
@@ -74,6 +83,32 @@ jobs:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
 ```
 
+**claude-ontology-review.yml** — 本体一致性审核（仅 Java 项目）
+
+```yaml
+name: Claude Ontology Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+jobs:
+  ontology-review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: invagent/pr-workflows/.github/workflows/claude-ontology-review.yml@master
+    with:
+      # 可选：指定本体对象 slug，留空则自动探测
+      ontology_objects: ''
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
+      YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
+```
+
 **claude.yml** — `@claude` 交互
 
 ```yaml
@@ -97,4 +132,43 @@ jobs:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
 ```
 
-三个工作流按需选用，不必全部接入。
+**jenkins-deploy.yml** — 部署构建，可选串联自动化测试
+
+```yaml
+name: Trigger Jenkins Deploy
+
+on:
+  push:
+    branches:
+      - test
+
+jobs:
+  deploy:
+    uses: invagent/pr-workflows/.github/workflows/jenkins-deploy.yml@master
+    with:
+      service: 'your-service-name'
+      branch: 'test'
+      deploy: 'true'
+    secrets:
+      JENKINS_URL: ${{ secrets.JENKINS_URL }}
+      JENKINS_USER: ${{ secrets.JENKINS_USER }}
+      JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+      JENKINS_PIPELINE_TOKEN: ${{ secrets.JENKINS_PIPELINE_TOKEN }}
+
+  # 可选：部署成功后触发自动化测试（去掉此 job 则不触发）
+  autotest:
+    needs: deploy
+    if: success()
+    uses: invagent/pr-workflows/.github/workflows/jenkins-autotest.yml@master
+    with:
+      run_mode: 'issue_invoice'
+      issue_mode: 'smoke'
+      issue_type: 'blue'
+    secrets:
+      JENKINS_URL: ${{ secrets.JENKINS_URL }}
+      JENKINS_USER: ${{ secrets.JENKINS_USER }}
+      JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
+      JENKINS_PIPELINE_TOKEN: ${{ secrets.JENKINS_PIPELINE_TOKEN }}
+```
+
+所有工作流按需选用，不必全部接入。
