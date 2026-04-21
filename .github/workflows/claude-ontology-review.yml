@@ -18,6 +18,10 @@ on:
         required: false
       ONTOLOGY_MCP_TOKEN:
         required: false
+      YUNZHIJIA_NOTIFY_URL:
+        required: false
+      YUNZHIJIA_ACCESS_TOKEN:
+        required: false
 
 jobs:
   ontology-review:
@@ -186,6 +190,32 @@ jobs:
           claude_args: |
             --allowedTools "mcp__ontology__list_object_types,mcp__ontology__list_documents,mcp__ontology__get_object_detail,mcp__ontology__get_document,mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
             --max-turns 40
+
+      - name: Notify user via Yunzhijia
+        if: always() && steps.detect-java.outputs.is_java == 'true'
+        run: |
+          AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
+
+          if [ -z "$AUTHOR_NAME" ]; then
+            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            exit 0
+          fi
+
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$AUTHOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"你的 PR《${PR_TITLE}》本体审核已完成，请点击链接查看审核结果\",
+              \"url\": \"$PR_URL\"
+            }"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Skip notice (non-Java project)
         if: steps.detect-java.outputs.is_java != 'true'
