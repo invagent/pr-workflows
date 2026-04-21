@@ -91,6 +91,8 @@ name: Claude Ontology Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review]
+    branches:
+      - test  # 只对目标分支为 test 的 PR 触发
 
 jobs:
   ontology-review:
@@ -132,7 +134,7 @@ jobs:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
 ```
 
-**jenkins-deploy.yml** — 部署构建，可选串联自动化测试
+**jenkins-deploy.yml** — 部署构建，可选串联自动化测试；构建失败时云之家通知触发人
 
 ```yaml
 name: Trigger Jenkins Deploy
@@ -154,6 +156,8 @@ jobs:
       JENKINS_USER: ${{ secrets.JENKINS_USER }}
       JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
       JENKINS_PIPELINE_TOKEN: ${{ secrets.JENKINS_PIPELINE_TOKEN }}
+      YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
+      YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
 
   # 可选：部署成功后触发自动化测试（去掉此 job 则不触发）
   autotest:
@@ -169,6 +173,8 @@ jobs:
       JENKINS_USER: ${{ secrets.JENKINS_USER }}
       JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
       JENKINS_PIPELINE_TOKEN: ${{ secrets.JENKINS_PIPELINE_TOKEN }}
+      YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
+      YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
 ```
 
 所有工作流按需选用，不必全部接入。
