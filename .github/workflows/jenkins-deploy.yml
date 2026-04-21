@@ -27,6 +27,10 @@ on:
         required: true
       JENKINS_PIPELINE_TOKEN:
         required: true
+      YUNZHIJIA_NOTIFY_URL:
+        required: false
+      YUNZHIJIA_ACCESS_TOKEN:
+        required: false
 
 jobs:
   trigger-jenkins:
@@ -92,3 +96,24 @@ jobs:
 
           echo "Timed out waiting for build result (30 min)"
           exit 1
+
+      - name: Notify failure via Yunzhijia
+        if: failure()
+        run: |
+          ACTOR_NAME=$(gh api users/${{ github.actor }} --jq '.name // empty' 2>/dev/null || true)
+          if [ -z "$ACTOR_NAME" ]; then
+            echo "No Chinese name found for ${{ github.actor }}, skipping notification"
+            exit 0
+          fi
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$ACTOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"部署构建失败，请点击链接查看详情\",
+              \"url\": \"$RUN_URL\"
+            }" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
