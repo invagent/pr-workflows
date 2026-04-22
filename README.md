@@ -37,7 +37,8 @@ Secrets 已在组织层面统一配置，子项目无需重复设置。如需使
 | `JENKINS_URL` | Jenkins 代理地址 |
 | `JENKINS_USER` | Jenkins 用户名 |
 | `JENKINS_API_TOKEN` | Jenkins API Token |
-| `JENKINS_PIPELINE_TOKEN` | 流水线触发 Token |
+| `JENKINS_PIPELINE_TOKEN` | 部署流水线触发 Token |
+| `JENKINS_AUTOTEST_TOKEN` | 自动化测试流水线触发 Token |
 
 ### 创建工作流文件
 
@@ -168,11 +169,14 @@ jobs:
       run_mode: 'issue_invoice'
       issue_mode: 'smoke'
       issue_type: 'blue'
+      threads: '1'          # 可选，默认 1
     secrets:
       JENKINS_URL: ${{ secrets.JENKINS_URL }}
       JENKINS_USER: ${{ secrets.JENKINS_USER }}
       JENKINS_API_TOKEN: ${{ secrets.JENKINS_API_TOKEN }}
-      JENKINS_PIPELINE_TOKEN: ${{ secrets.JENKINS_PIPELINE_TOKEN }}
+      JENKINS_AUTOTEST_TOKEN: ${{ secrets.JENKINS_AUTOTEST_TOKEN }}
+      YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
+      YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
       YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
       YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
 ```
