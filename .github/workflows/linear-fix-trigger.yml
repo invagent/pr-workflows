@@ -1,0 +1,97 @@
+# .github/workflows/linear-fix-trigger.yml
+name: Linear Fix-Pr Trigger
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: 'PR 编号'
+        required: true
+        type: number
+      pr_title:
+        description: 'PR 标题（用于提取 Linear Issue ID）'
+        required: true
+        type: string
+      pr_head_ref:
+        description: 'PR 分支名（用于提取 Linear Issue ID）'
+        required: true
+        type: string
+      repository:
+        description: '仓库名，如 invagent/fpy-ar-invoice-ontology'
+        required: true
+        type: string
+    secrets:
+      ARTIFACTS_REPO_TOKEN:
+        required: true
+      LINEAR_TRIGGER_URL:
+        required: true
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract Linear Issue ID
+        id: extract-id
+        run: |
+          LINEAR_ID=$(echo "${{ inputs.pr_title }} ${{ inputs.pr_head_ref }}" \
+            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+
+          if [ -z "$LINEAR_ID" ]; then
+            echo "No Linear issue ID found in PR title or branch name, skipping"
+            echo "linear_id=" >> "$GITHUB_OUTPUT"
+          else
+            echo "linear_id=${LINEAR_ID}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check report for issues
+        id: check-report
+        if: steps.extract-id.outputs.linear_id != ''
+        run: |
+          LINEAR_ID="${{ steps.extract-id.outputs.linear_id }}"
+
+          # Clone artifacts repo (shallow)
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
+            /tmp/artifacts-repo
+
+          REVIEW_DIR="/tmp/artifacts-repo/${LINEAR_ID}/ontology-review"
+
+          if [ ! -d "$REVIEW_DIR" ]; then
+            echo "No ontology-review directory found for ${LINEAR_ID}, skipping trigger"
+            echo "has_issues=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 取最新的 -PR.md 报告文件
+          REPORT_FILE=$(ls "${REVIEW_DIR}"/*-PR.md 2>/dev/null | sort | tail -1)
+
+          if [ -z "$REPORT_FILE" ]; then
+            echo "No report file found for ${LINEAR_ID}, skipping trigger"
+            echo "has_issues=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 读取第一行标记
+          FIRST_LINE=$(head -1 "$REPORT_FILE")
+          if [ "$FIRST_LINE" = "HAS_ISSUES" ]; then
+            echo "has_issues=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_issues=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Linear Fix-Pr
+        if: steps.extract-id.outputs.linear_id != '' && steps.check-report.outputs.has_issues == 'true'
+        run: |
+          LINEAR_ID="${{ steps.extract-id.outputs.linear_id }}"
+          PR_URL="https://github.com/${{ inputs.repository }}/pull/${{ inputs.pr_number }}"
+          TRIGGER_URL="${{ secrets.LINEAR_TRIGGER_URL }}"
+
+          echo "Triggering Fix-Pr for ${LINEAR_ID}, PR: ${PR_URL}"
+
+          curl -s -f -X POST "${TRIGGER_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"identifier\": \"${LINEAR_ID}\",
+              \"reportUrl\": \"${PR_URL}\",
+              \"type\": \"Fix-Pr\"
+            }"

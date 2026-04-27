@@ -15,12 +15,14 @@ on:
       ANTHROPIC_BASE_URL:
         required: false
       ONTOLOGY_MCP_URL:
-        required: false
+        required: true
       ONTOLOGY_MCP_TOKEN:
-        required: false
+        required: true
       YUNZHIJIA_NOTIFY_URL:
         required: false
       YUNZHIJIA_ACCESS_TOKEN:
+        required: false
+      ARTIFACTS_REPO_TOKEN:
         required: false
 
 jobs:
@@ -58,9 +60,9 @@ jobs:
               "mcpServers": {
                 "ontology": {
                   "type": "http",
-                  "url": "${{ secrets.ONTOLOGY_MCP_URL || 'http://170.106.141.117/ontology-mcp/mcp' }}",
+                  "url": "${{ secrets.ONTOLOGY_MCP_URL }}",
                   "headers": {
-                    "Authorization": "Bearer ${{ secrets.ONTOLOGY_MCP_TOKEN || 'fpy2026#$' }}"
+                    "Authorization": "Bearer ${{ secrets.ONTOLOGY_MCP_TOKEN }}"
                   }
                 }
               }
@@ -187,9 +189,67 @@ jobs:
             ### 无问题时
             如果本项目不包含本体相关代码，或本次 PR 未涉及本体对象，请用 `gh pr comment` 说明跳过原因。
 
+            ### 写入审核报告文件（必须执行）
+            完成所有评论后，将完整的问题汇总表（Markdown 格式）写入 `/tmp/ontology-review-report.md`。
+            - 文件第一行必须是 `HAS_ISSUES` 或 `NO_ISSUES`（根据是否存在 🔴 严重 或 🟡 警告 级别问题）
+            - 第二行空行
+            - 第三行起为完整的审核报告正文（包含问题汇总表）
+            - 若跳过审核，写入 `NO_ISSUES` 并说明跳过原因
+
           claude_args: |
             --allowedTools "mcp__ontology__list_object_types,mcp__ontology__list_documents,mcp__ontology__get_object_detail,mcp__ontology__get_document,mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
             --max-turns 40
+
+      - name: Save review report to artifacts repo
+        if: steps.detect-java.outputs.is_java == 'true' && secrets.ARTIFACTS_REPO_TOKEN != ''
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          TODAY=$(date +%Y-%m-%d)
+
+          # 从 PR 标题或分支名提取 Linear Issue ID（如 CNPRD-314）
+          LINEAR_ID=$(echo "$PR_TITLE ${{ github.event.pull_request.head.ref }}" \
+            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+
+          if [ -z "$LINEAR_ID" ]; then
+            echo "No Linear issue ID found, skipping artifact upload"
+            exit 0
+          fi
+
+          REPORT_FILE="/tmp/ontology-review-report.md"
+          if [ ! -f "$REPORT_FILE" ]; then
+            echo "Report file not found, skipping artifact upload"
+            exit 0
+          fi
+
+          # Clone artifacts repo
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
+            /tmp/artifacts-repo
+
+          # 创建目录
+          mkdir -p "/tmp/artifacts-repo/${LINEAR_ID}/ontology-review"
+
+          # 写入报告（保留第一行 HAS_ISSUES/NO_ISSUES 标记，供 linear-fix-trigger 读取）
+          TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
+          cp "$REPORT_FILE" "/tmp/artifacts-repo/${LINEAR_ID}/ontology-review/${TIMESTAMP}-PR.md"
+
+          # 确保 issue 目录有 README
+          if [ ! -f "/tmp/artifacts-repo/${LINEAR_ID}/README.md" ]; then
+            echo "# ${LINEAR_ID}" > "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "PR: https://github.com/${REPO}/pull/${PR_NUMBER}" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+          fi
+
+          cd /tmp/artifacts-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "${LINEAR_ID}/"
+          git commit -m "chore: add ontology review report for ${LINEAR_ID} PR#${PR_NUMBER}" || echo "Nothing to commit"
+          git push
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Notify user via Yunzhijia
         if: always() && steps.detect-java.outputs.is_java == 'true'
