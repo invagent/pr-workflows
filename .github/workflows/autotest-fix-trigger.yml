@@ -37,10 +37,10 @@ jobs:
             "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
             /tmp/artifacts-repo
 
-          REPORT_DIR="/tmp/artifacts-repo/${LINEAR_ID}/unit-test"
+          REPORT_DIR="/tmp/artifacts-repo/${LINEAR_ID}/autotest"
 
           if [ ! -d "$REPORT_DIR" ]; then
-            echo "No unit-test directory found for ${LINEAR_ID}, skipping"
+            echo "No autotest directory found for ${LINEAR_ID}, skipping"
             exit 0
           fi
 
@@ -76,7 +76,7 @@ jobs:
 
           # 构造 reportUrl
           REPORT_FILENAME=$(basename "$REPORT_FILE")
-          REPORT_URL="https://github.com/invagent/develop-workflow-artifacts/blob/master/${LINEAR_ID}/unit-test/${REPORT_FILENAME}"
+          REPORT_URL="https://github.com/invagent/develop-workflow-artifacts/blob/master/${LINEAR_ID}/autotest/${REPORT_FILENAME}"
 
           curl -s -f -X POST "${{ secrets.LINEAR_TRIGGER_URL }}" \
             -H "Content-Type: application/json" \
