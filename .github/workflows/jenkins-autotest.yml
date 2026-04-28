@@ -21,6 +21,11 @@ on:
         required: false
         type: string
         default: '1'
+      issue_id:
+        description: 'Linear Issue ID，如 CNPRD-314，透传给 Jenkins ISSUE_ID 参数'
+        required: false
+        type: string
+        default: ''
     secrets:
       JENKINS_URL:
         required: true
@@ -49,9 +54,13 @@ jobs:
           echo "Current build number before trigger: $BEFORE"
 
           # 触发构建
+          ISSUE_ID_PARAM=""
+          if [ -n "${{ inputs.issue_id }}" ]; then
+            ISSUE_ID_PARAM="&ISSUE_ID=${{ inputs.issue_id }}"
+          fi
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST -u "$AUTH" \
-            "${{ secrets.JENKINS_URL }}/cicd-job/at-automated-test/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&ISSUE_MODE=${{ inputs.issue_mode }}&ISSUE_TYPE=${{ inputs.issue_type }}&THREADS=${{ inputs.threads }}")
+            "${{ secrets.JENKINS_URL }}/cicd-job/at-automated-test/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&ISSUE_MODE=${{ inputs.issue_mode }}&ISSUE_TYPE=${{ inputs.issue_type }}&THREADS=${{ inputs.threads }}${ISSUE_ID_PARAM}")
 
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Failed to trigger autotest build (HTTP $HTTP_CODE)"
