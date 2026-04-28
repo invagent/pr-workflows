@@ -20,7 +20,7 @@ on:
         description: 'Jenkins THREADS 参数'
         required: false
         type: string
-        default: '1'
+        default: '4'
       issue_id:
         description: 'Linear Issue ID，如 CNPRD-314，透传给 Jenkins ISSUE_ID 参数'
         required: false
