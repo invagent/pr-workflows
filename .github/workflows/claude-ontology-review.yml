@@ -191,7 +191,7 @@ jobs:
 
             ### 写入审核报告文件（必须执行）
             完成所有评论后，将完整的问题汇总表（Markdown 格式）写入 `/tmp/ontology-review-report.md`。
-            - 文件第一行必须是 `HAS_ISSUES` 或 `NO_ISSUES`（根据是否存在 🔴 严重 或 🟡 警告 级别问题）
+            - 文件第一行必须是 `HAS_ISSUES` 或 `NO_ISSUES`（根据是否存在 🔴 严重 级别问题）
             - 第二行空行
             - 第三行起为完整的审核报告正文（包含问题汇总表）
             - 若跳过审核，写入 `NO_ISSUES` 并说明跳过原因
