@@ -48,6 +48,25 @@ jobs:
             echo "is_java=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Write MCP config
+        if: steps.detect-java.outputs.is_java == 'true'
+        run: |
+          cat > /tmp/mcp-config.json << 'EOF_OUTER'
+          {
+            "mcpServers": {
+              "ontology": {
+                "type": "http",
+                "url": "ONTOLOGY_MCP_URL_PLACEHOLDER",
+                "headers": {
+                  "Authorization": "Bearer ONTOLOGY_MCP_TOKEN_PLACEHOLDER"
+                }
+              }
+            }
+          }
+          EOF_OUTER
+          sed -i "s|ONTOLOGY_MCP_URL_PLACEHOLDER|${{ secrets.ONTOLOGY_MCP_URL }}|g" /tmp/mcp-config.json
+          sed -i "s|ONTOLOGY_MCP_TOKEN_PLACEHOLDER|${{ secrets.ONTOLOGY_MCP_TOKEN }}|g" /tmp/mcp-config.json
+
       - name: Claude Ontology Review
         if: steps.detect-java.outputs.is_java == 'true'
         uses: anthropics/claude-code-action@v1
@@ -55,18 +74,6 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          mcp_config: |
-            {
-              "mcpServers": {
-                "ontology": {
-                  "type": "http",
-                  "url": "${{ secrets.ONTOLOGY_MCP_URL }}",
-                  "headers": {
-                    "Authorization": "Bearer ${{ secrets.ONTOLOGY_MCP_TOKEN }}"
-                  }
-                }
-              }
-            }
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -199,6 +206,7 @@ jobs:
           claude_args: |
             --allowedTools "mcp__ontology__list_object_types,mcp__ontology__list_documents,mcp__ontology__get_object_detail,mcp__ontology__get_document,mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
             --max-turns 40
+            --mcp-config /tmp/mcp-config.json
 
       - name: Save review report to artifacts repo
         if: steps.detect-java.outputs.is_java == 'true'

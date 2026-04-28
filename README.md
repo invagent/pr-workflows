@@ -9,6 +9,8 @@
 | `claude-review.yml` | PR 创建、代码更新、标记 Ready（跳过 Draft） | 全量代码审查，覆盖代码质量、安全性、性能、测试 |
 | `claude-security.yml` | PR 涉及敏感路径变更 | 深度安全审查，对照 OWASP Top 10 逐项检查 |
 | `claude-ontology-review.yml` | PR 创建、代码更新、标记 Ready（仅 Java 项目） | 本体设计与代码实现一致性审核，审核完成后云之家通知 PR 作者 |
+| `linear-fix-trigger.yml` | 由 ontology-review job 完成后串联调用（不可独立使用） | 读取 artifacts 仓库本体审核报告，有 🔴 严重问题则触发 Linear Fix-Pr |
+| `autotest-fix-trigger.yml` | 由 autotest job 成功后串联调用（不可独立使用） | 读取 artifacts 仓库端到端测试报告，通过率 < 阈值（默认 90%）则触发 Linear Fix-Bug |
 | `claude.yml` | Issue 或 PR 评论中包含 `@claude` | AI 实时交互，支持代码解释、方案讨论等 |
 | `jenkins-deploy.yml` | push to test 分支 | 触发 Jenkins 部署构建并等待结果 |
 | `jenkins-autotest.yml` | 通常由 jenkins-deploy.yml 串联触发 | 触发 Jenkins 自动化测试并等待结果 |
@@ -34,11 +36,15 @@ Secrets 已在组织层面统一配置，子项目无需重复设置。如需使
 | `ANTHROPIC_BASE_URL` | 自定义 API 端点（使用代理时填写） |
 | `YUNZHIJIA_NOTIFY_URL` | 云之家通知接口地址 |
 | `YUNZHIJIA_ACCESS_TOKEN` | 云之家通知 Token |
+| `ONTOLOGY_MCP_URL` | ontology-mcp 服务地址（claude-ontology-review.yml 必需） |
+| `ONTOLOGY_MCP_TOKEN` | ontology-mcp 认证 Token（claude-ontology-review.yml 必需） |
 | `JENKINS_URL` | Jenkins 代理地址 |
 | `JENKINS_USER` | Jenkins 用户名 |
 | `JENKINS_API_TOKEN` | Jenkins API Token |
 | `JENKINS_PIPELINE_TOKEN` | 部署流水线触发 Token |
 | `JENKINS_AUTOTEST_TOKEN` | 自动化测试流水线触发 Token |
+| `ARTIFACTS_REPO_TOKEN` | develop-workflow-artifacts 仓库读取 Token |
+| `LINEAR_TRIGGER_URL` | Linear Fix-Pr / Fix-Bug 触发接口地址 |
 
 ### 创建工作流文件
 
@@ -108,8 +114,25 @@ jobs:
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ONTOLOGY_MCP_URL: ${{ secrets.ONTOLOGY_MCP_URL }}
+      ONTOLOGY_MCP_TOKEN: ${{ secrets.ONTOLOGY_MCP_TOKEN }}
+      ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
       YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
       YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
+
+  # 可选：本体审核完成后，有严重问题则触发 Linear Fix-Pr
+  linear-trigger:
+    needs: ontology-review
+    if: always() && needs.ontology-review.result != 'skipped'
+    uses: invagent/pr-workflows/.github/workflows/linear-fix-trigger.yml@master
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+      pr_title: ${{ github.event.pull_request.title }}
+      pr_head_ref: ${{ github.event.pull_request.head.ref }}
+      repository: ${{ github.repository }}
+    secrets:
+      ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
+      LINEAR_TRIGGER_URL: ${{ secrets.LINEAR_TRIGGER_URL }}
 ```
 
 **claude.yml** — `@claude` 交互
@@ -135,7 +158,7 @@ jobs:
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
 ```
 
-**jenkins-deploy.yml** — 部署构建，可选串联自动化测试；构建失败时云之家通知触发人
+**jenkins-deploy.yml** — 部署构建，可选串联自动化测试及 Fix-Bug 触发；构建失败时云之家通知触发人
 
 ```yaml
 name: Trigger Jenkins Deploy
@@ -146,6 +169,17 @@ on:
       - test
 
 jobs:
+  extract-id:
+    runs-on: ubuntu-latest
+    outputs:
+      linear_id: ${{ steps.extract.outputs.linear_id }}
+    steps:
+      - id: extract
+        run: |
+          LINEAR_ID=$(echo "${{ github.ref_name }} ${{ github.event.head_commit.message }}" \
+            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+          echo "linear_id=${LINEAR_ID}" >> "$GITHUB_OUTPUT"
+
   deploy:
     uses: invagent/pr-workflows/.github/workflows/jenkins-deploy.yml@master
     with:
@@ -162,14 +196,15 @@ jobs:
 
   # 可选：部署成功后触发自动化测试（去掉此 job 则不触发）
   autotest:
-    needs: deploy
-    if: success()
+    needs: [deploy, extract-id]
+    if: needs.deploy.result == 'success'
     uses: invagent/pr-workflows/.github/workflows/jenkins-autotest.yml@master
     with:
       run_mode: 'issue_invoice'
       issue_mode: 'smoke'
       issue_type: 'blue'
       threads: '1'          # 可选，默认 1
+      issue_id: ${{ needs.extract-id.outputs.linear_id }}
     secrets:
       JENKINS_URL: ${{ secrets.JENKINS_URL }}
       JENKINS_USER: ${{ secrets.JENKINS_USER }}
@@ -177,8 +212,19 @@ jobs:
       JENKINS_AUTOTEST_TOKEN: ${{ secrets.JENKINS_AUTOTEST_TOKEN }}
       YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
       YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
-      YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
-      YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
+
+  # 可选：autotest 成功后检查通过率，低于阈值触发 Linear Fix-Bug
+  autotest-fix:
+    needs: [autotest, extract-id]
+    if: needs.autotest.result == 'success' && needs.extract-id.outputs.linear_id != ''
+    uses: invagent/pr-workflows/.github/workflows/autotest-fix-trigger.yml@master
+    with:
+      issue_id: ${{ needs.extract-id.outputs.linear_id }}
+      repository: ${{ github.repository }}
+      # pass_rate_threshold: '80'   # 可选，覆盖默认阈值 90
+    secrets:
+      ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
+      LINEAR_TRIGGER_URL: ${{ secrets.LINEAR_TRIGGER_URL }}
 ```
 
 所有工作流按需选用，不必全部接入。
