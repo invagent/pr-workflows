@@ -1,0 +1,87 @@
+# .github/workflows/autotest-fix-trigger.yml
+name: Autotest Fix-Bug Trigger
+
+on:
+  workflow_call:
+    inputs:
+      issue_id:
+        description: 'Linear Issue ID，如 CNPRD-314'
+        required: true
+        type: string
+      repository:
+        description: '仓库名，如 invagent/fpy-ar-invoice-ontology'
+        required: true
+        type: string
+      pass_rate_threshold:
+        description: '通过率阈值（百分比），低于此值触发 Fix-Bug'
+        required: false
+        type: string
+        default: '90'
+    secrets:
+      ARTIFACTS_REPO_TOKEN:
+        required: true
+      LINEAR_TRIGGER_URL:
+        required: true
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check autotest report and trigger Fix-Bug
+        run: |
+          LINEAR_ID="${{ inputs.issue_id }}"
+          THRESHOLD="${{ inputs.pass_rate_threshold }}"
+
+          # Clone artifacts repo (shallow)
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
+            /tmp/artifacts-repo
+
+          REPORT_DIR="/tmp/artifacts-repo/${LINEAR_ID}/unit-test"
+
+          if [ ! -d "$REPORT_DIR" ]; then
+            echo "No unit-test directory found for ${LINEAR_ID}, skipping"
+            exit 0
+          fi
+
+          # 取最新的 -run.md 报告文件
+          REPORT_FILE=$(ls "${REPORT_DIR}"/*-run.md 2>/dev/null | sort | tail -1)
+
+          if [ -z "$REPORT_FILE" ]; then
+            echo "No report file found for ${LINEAR_ID}, skipping"
+            exit 0
+          fi
+
+          echo "Found report: $REPORT_FILE"
+
+          # 解析通过率
+          PASS_RATE=$(grep -oP '通过率：\K[\d.]+' "$REPORT_FILE" || echo "")
+
+          if [ -z "$PASS_RATE" ]; then
+            echo "Could not parse pass rate from report, skipping"
+            exit 0
+          fi
+
+          echo "Pass rate: ${PASS_RATE}%"
+
+          # 比较通过率与阈值
+          SHOULD_TRIGGER=$(python3 -c "print('yes' if float('${PASS_RATE}') < float('${THRESHOLD}') else 'no')")
+
+          if [ "$SHOULD_TRIGGER" != "yes" ]; then
+            echo "Pass rate ${PASS_RATE}% >= ${THRESHOLD}%, no trigger needed"
+            exit 0
+          fi
+
+          echo "Pass rate ${PASS_RATE}% < ${THRESHOLD}%, triggering Fix-Bug..."
+
+          # 构造 reportUrl
+          REPORT_FILENAME=$(basename "$REPORT_FILE")
+          REPORT_URL="https://github.com/invagent/develop-workflow-artifacts/blob/master/${LINEAR_ID}/unit-test/${REPORT_FILENAME}"
+
+          curl -s -f -X POST "${{ secrets.LINEAR_TRIGGER_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"reportUrl\": \"${REPORT_URL}\",
+              \"identifier\": \"${LINEAR_ID}\",
+              \"type\": \"Fix-Bug\"
+            }"
