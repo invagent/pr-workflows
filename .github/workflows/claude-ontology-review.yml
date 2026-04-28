@@ -68,6 +68,7 @@ jobs:
           sed -i "s|ONTOLOGY_MCP_TOKEN_PLACEHOLDER|${{ secrets.ONTOLOGY_MCP_TOKEN }}|g" /tmp/mcp-config.json
 
       - name: Claude Ontology Review
+        id: claude-ontology-review
         if: steps.detect-java.outputs.is_java == 'true'
         uses: anthropics/claude-code-action@v1
         env:
@@ -260,7 +261,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Notify user via Yunzhijia
-        if: always() && steps.detect-java.outputs.is_java == 'true'
+        if: steps.detect-java.outputs.is_java == 'true' && steps.claude-ontology-review.outcome == 'success'
         run: |
           AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
           AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
@@ -282,6 +283,32 @@ jobs:
               \"text\": \"你的 PR《${PR_TITLE}》本体审核已完成，请点击链接查看审核结果\",
               \"url\": \"$PR_URL\"
             }"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Notify failure via Yunzhijia
+        if: steps.detect-java.outputs.is_java == 'true' && steps.claude-ontology-review.outcome == 'failure'
+        run: |
+          AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
+
+          if [ -z "$AUTHOR_NAME" ]; then
+            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            exit 0
+          fi
+
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$AUTHOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"你的 PR《${PR_TITLE}》本体审核执行失败，请点击链接查看详情\",
+              \"url\": \"$RUN_URL\"
+            }" || true
         env:
           GH_TOKEN: ${{ github.token }}
 
