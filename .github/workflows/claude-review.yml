@@ -105,7 +105,7 @@ jobs:
             请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
             对于整体评价，使用 `gh pr comment` 添加总结性评论。
 
-          model: claude-sonnet-4-6
           claude_args: |
+            --model claude-sonnet-4-6
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
             --max-turns 20
