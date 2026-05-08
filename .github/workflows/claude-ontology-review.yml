@@ -24,6 +24,8 @@ on:
         required: false
       ARTIFACTS_REPO_TOKEN:
         required: false
+      ANTHROPIC_MODEL:
+        required: false
 
 jobs:
   ontology-review:
@@ -73,6 +75,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
@@ -205,7 +208,6 @@ jobs:
             - 若跳过审核，写入 `NO_ISSUES` 并说明跳过原因
 
           claude_args: |
-            --model claude-sonnet-4-6
             --allowedTools "mcp__ontology__list_object_types,mcp__ontology__list_documents,mcp__ontology__get_object_detail,mcp__ontology__get_document,mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
             --max-turns 40
             --mcp-config /tmp/mcp-config.json
