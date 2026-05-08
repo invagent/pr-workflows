@@ -34,6 +34,7 @@ Secrets 已在组织层面统一配置，子项目无需重复设置。如需使
 |------|------|
 | `ANTHROPIC_API_KEY` | Anthropic API 访问密钥 |
 | `ANTHROPIC_BASE_URL` | 自定义 API 端点（使用代理时填写） |
+| `ANTHROPIC_MODEL` | 指定使用的模型（如 `claude-sonnet-4-6`，不填则使用默认模型） |
 | `YUNZHIJIA_NOTIFY_URL` | 云之家通知接口地址 |
 | `YUNZHIJIA_ACCESS_TOKEN` | 云之家通知 Token |
 | `ONTOLOGY_MCP_URL` | ontology-mcp 服务地址（claude-ontology-review.yml 必需） |
@@ -65,6 +66,7 @@ jobs:
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
 ```
 
 **claude-security.yml** — 安全敏感路径审查（按实际路径修改 `paths`）
@@ -88,6 +90,7 @@ jobs:
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
 ```
 
 **claude-ontology-review.yml** — 本体一致性审核（仅 Java 项目）
@@ -114,6 +117,7 @@ jobs:
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
       ONTOLOGY_MCP_URL: ${{ secrets.ONTOLOGY_MCP_URL }}
       ONTOLOGY_MCP_TOKEN: ${{ secrets.ONTOLOGY_MCP_TOKEN }}
       ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
@@ -156,6 +160,7 @@ jobs:
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
 ```
 
 **jenkins-deploy.yml** — 部署构建，可选串联自动化测试及 Fix-Bug 触发；构建失败时云之家通知触发人
