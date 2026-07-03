@@ -29,11 +29,13 @@ jobs:
       - name: Detect changed ontology files
         id: detect
         run: |
-          # 用 PR 的 base..head 比对，确保拿到整个 PR 的所有变更文件
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          # 用 GitHub API 获取整个 PR 的变更文件，不依赖 git diff
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
 
-          CHANGED=$(git diff --name-only "$BASE"..."$HEAD" \
+          CHANGED=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --paginate \
+            --jq '.[].filename' \
             | grep -E '\.md$' \
             | grep -v '^\.github/' \
             || true)
@@ -45,6 +47,8 @@ jobs:
             FILES=$(echo "$CHANGED" | tr '\n' ',' | sed 's/,$//')
             echo "changed_files=$FILES" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Skip if no md changes
         if: steps.detect.outputs.no_changes == 'true'
