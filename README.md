@@ -9,6 +9,7 @@
 | `claude-review.yml` | PR 创建、代码更新、标记 Ready（跳过 Draft） | 全量代码审查，覆盖代码质量、安全性、性能、测试 |
 | `claude-security.yml` | PR 涉及敏感路径变更 | 深度安全审查，对照 OWASP Top 10 逐项检查 |
 | `claude-ontology-review.yml` | PR 创建、代码更新、标记 Ready（仅 Java 项目） | 本体设计与代码实现一致性审核，审核完成后云之家通知 PR 作者 |
+| `claude-ontology-doc-review.yml` | PR 涉及本体 md 文件变更（跳过 Draft） | 本体文档自身建模规范审核，覆盖 ID 不可变、跨对象一致性、跨文件引用、完整性、格式规范、级联影响六大类检查 |
 | `linear-fix-trigger.yml` | 由 ontology-review job 完成后串联调用（不可独立使用） | 读取 artifacts 仓库本体审核报告，有 🔴 严重问题则触发 Linear Fix-Pr |
 | `autotest-fix-trigger.yml` | 由 autotest job 成功后串联调用（不可独立使用） | 读取 artifacts 仓库端到端测试报告，通过率 < 阈值（默认 90%）则触发 Linear Fix-Bug |
 | `claude.yml` | Issue 或 PR 评论中包含 `@claude` | AI 实时交互，支持代码解释、方案讨论等 |
@@ -137,6 +138,37 @@ jobs:
     secrets:
       ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
       LINEAR_TRIGGER_URL: ${{ secrets.LINEAR_TRIGGER_URL }}
+```
+
+**claude-ontology-doc-review.yml** — 本体文档建模规范审核（知识本体仓库使用）
+
+本 workflow 审核本体 md 文件本身是否符合建模规范，与 `claude-ontology-review.yml`（代码与本体一致性）是并列关系。适用于管理知识本体文档的仓库（如 `invagent/document`）。
+
+审核覆盖六大类规则：
+- **A. ID 不可变**：已发布 ID 禁止修改、删除、重排
+- **B. 跨对象一致性**：同名字段中文名、EXT 层归属、中文名唯一性
+- **C. 跨文件引用**：ActionTypes/LinkTypes/Functions/RulePackage 间的引用完整性
+- **D. 发布前完整性**：last-modified、VERSION.md、无【待补充】残留
+- **E. 格式规范**：frontmatter、文件命名、禁用 `<font>` 标签、文件职责边界
+- **F. 级联影响**：变更是否需要同步更新其他文件
+
+```yaml
+name: Ontology Doc Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    paths:
+      - '知识与运营管理部/**/*.md'   # 按实际本体目录调整
+
+jobs:
+  doc-review:
+    uses: invagent/pr-workflows/.github/workflows/claude-ontology-doc-review.yml@master
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+      ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
 ```
 
 **claude.yml** — `@claude` 交互

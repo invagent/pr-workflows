@@ -1,0 +1,285 @@
+name: Claude Ontology Doc Review
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      ANTHROPIC_BASE_URL:
+        required: false
+      ANTHROPIC_MODEL:
+        required: false
+      ARTIFACTS_REPO_TOKEN:
+        required: false
+
+jobs:
+  ontology-doc-review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed ontology files
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD \
+            | grep -E '\.md$' \
+            | grep -v '^\.github/' \
+            || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no_changes=false" >> "$GITHUB_OUTPUT"
+            FILES=$(echo "$CHANGED" | tr '\n' ',' | sed 's/,$//')
+            echo "changed_files=$FILES" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if no md changes
+        if: steps.detect.outputs.no_changes == 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "⏭️ **本体文档审核已跳过**：本次 PR 未包含本体 md 文件变更。" \
+            --repo ${{ github.repository }} || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Claude Ontology Doc Review
+        id: claude-doc-review
+        if: steps.detect.outputs.no_changes == 'false'
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR TITLE: ${{ github.event.pull_request.title }}
+            AUTHOR: ${{ github.event.pull_request.user.login }}
+            CHANGED FILES: ${{ steps.detect.outputs.changed_files }}
+
+            你是一名知识本体审核专家。请对本次 PR 中变更的本体文档执行**建模规范审核**，审核依据是下方三份规范全文。
+
+            ---
+
+            ## 规范一：本体发布审核清单（Publication Audit）
+
+            > 触发时机：本体推送到 GitHub 前的强制门禁，任何 ✗ 错误项未消解禁止推送。
+
+            ### A. ID 不可变规则（最高优先级 · 阻断发布）
+
+            核心约束：本体的所有 ID（PRO-/STS-/ACT-/LNK-/FN-）一旦发布到 GitHub main 即永久存在，禁止任何形式的修改、删除或重新编号。
+
+            **A1. 已发布 ID 不可修改**
+            检查方式：
+            1. 从 GitHub main 分支（origin/main）拉取所有已发布对象的 ID 清单（属性/状态/动作/链接/函数 ID）
+            2. 与本次变更版本逐一比对
+            3. 发现下列情况 → ✗ 阻断：
+               - 已发布 ID 被改名
+               - 已发布 ID 被物理删除（未保留 [DEP] 标记原行）
+               - 已发布 ID 序号被重新编排
+               - 已发布 ID 所属对象被改变
+
+            **A2. 允许的操作**
+            - ✓ 新增 ID：在现有最大序号基础上递增
+            - ✓ 废弃 ID：保留原行，仅加 [DEP] 标记
+            - ✓ 修改非 ID 字段：中文名、业务定义、数据类型、Card. 等
+
+            **A3. 无例外规则**
+            任何理由都不允许改已发布 ID。需作废重做时：新增一个序号递增的 ID，原 ID 保留行标 [DEP] 并指向新 ID。
+
+            ### B. 跨对象一致性规则
+
+            **B1. 同名字段中文名一致性**
+            - 提取所有对象属性表的英文路径列，去掉对象前缀后找同名字段
+            - BILLREQ 与 INVD 同名字段中文名不同 → ✗ 错误
+            - 不同对象语义阶段确实不同 → ⚠️ 警告，需在 design-notes 标注原因
+
+            **B2. 扩展层分类归属验证**
+            - 扩展层字段（EXT）的一级分类不能与业务层字段分类平级
+            - 孤立的"中国（CN）"无上级业务分类 → ✗ 错误
+
+            **B3. 对象内中文名称唯一性**
+            - 同一对象内属性中文名必须唯一，发现重名 → ✗ 错误
+
+            **B4. 业务对象类型ID 归属校验**
+            - 属性表中"业务对象类型ID"列必须与文件 frontmatter object: 声明一致，不一致 → ✗ 错误
+
+            ### C. 跨文件引用存在性
+
+            **C1.** ActionTypes 所有动作的 Guard/Effect 状态值 → 必须在 ValueSets 中存在，否则 ✗
+            **C2.** ActionTypes 关系写回段落的链接 ID → 必须在 LinkTypes 中存在，否则 ✗
+            **C3.** RulePackage 规则的数据依赖属性路径 → 必须在 Properties 中存在，否则 ✗
+            **C4.** LinkTypes 触发动作列的动作 ID → 必须在 ActionTypes 速查表中存在，否则 ✗
+
+            ### D. 发布前完整性
+
+            **D1.** 所有变更文件的 frontmatter last-modified 必须与本次版本号一致，否则 ✗
+            **D2.** 本次版本号必须在根 VERSION.md 中有对应条目，否则 ✗
+            **D3.** 所有变更文件不得残留【待补充】占位符，否则 ✗
+
+            ---
+
+            ## 规范二：本体建模公共约定（Conventions）
+
+            ### E. 格式与结构规范
+
+            **E1. frontmatter 完整性**
+            必填字段：object（顶层文件除外）、domain（顶层文件除外）、content-type、last-modified。缺失 → ✗ 错误。
+
+            **E2. content-type 枚举值**
+            合法值：Properties / Properties-design-notes / LinkTypes / ValueSets / ActionTypes / Functions / RulePackage / README / Changelog / ObjectRegistry。值不在枚举内 → ✗ 错误。
+
+            **E3. 文件命名规范**
+            函数总表必须命名为 _05.0_Functions.md，不得使用 _05.0_FunctionTypes.md 或其他变体，否则 ✗ 错误。
+
+            **E4. 禁用 `<font>` 标签**
+            本体文件中不允许出现 <font> 标签，发现 → ✗ 错误，需删除包裹保留文字。
+
+            **E5. 文件职责边界（防串位）**
+            各文件应只包含其职责范围内的内容：
+            - _01_Properties.md：属性列表、字段定义，不含状态机/动作/链接
+            - _03_ValueSets.md：状态枚举值和 Mermaid 流转图，不含字段级枚举
+            - _04_ActionTypes.md：动作清单 Guard/Effect，不含状态机定义/属性定义
+            - _05.0_Functions.md：函数体系调用链，不含 RulePackage 规则展开
+            发现内容串位 → ⚠️ 警告
+
+            **E6. 跨文件引用方式**
+            跨对象引用必须使用 ID/路径（如 STS-INVD-xxx），禁止复制完整定义内容。违反 → ⚠️ 警告
+
+            ---
+
+            ## 规范三：更新护栏（Update Guardrails）
+
+            ### F. 级联影响评估
+
+            本次 PR 变更后，评估是否存在需要同步更新的其他文件：
+
+            | 变更源 | 引用方 | 判断规则 |
+            |---|---|---|
+            | Properties.OntologyPath | ActionTypes 输入/写回、Functions L3、RulePackage 数据依赖 | 纯信息承载→无级联；流程控制型→级联 |
+            | ValueSets 状态码 | ActionTypes Guard/Effect、Functions L3 状态标记、Mermaid | 新增终态→可能级联；修改状态码→必须级联 |
+            | ActionTypes 动作ID/名称 | Functions 调用链、LinkTypes 触动作、ValueSets 转移线 | 新增→可能级联；改名→必须级联 |
+            | LinkTypes LinkID | ActionTypes 关系写回 | 通常需要级联 |
+            | Functions 函数ID | ActionTypes 关联函数 | 通常需要级联 |
+            | RulePackage 规则 | Functions RulePackage 引用描述 | 仅新增规则→无级联；新增 VL 层→必须级联 |
+
+            有需要级联但未同步的文件 → ⚠️ 警告，列出具体文件和建议操作。
+
+            ---
+
+            ## 审核步骤
+
+            ### Step 1：读取变更内容
+            对 CHANGED FILES 中每个文件执行 Read，同时用 `git diff origin/main -- <file>` 获取具体 diff。
+
+            ### Step 2：执行 A～F 各项规范检查
+            按上述规范逐项执行，记录每项结论（✓ / ✗ / ⚠️）。
+
+            ### Step 3：inline comment 标注问题
+            每个 ✗ 错误项，使用 `gh pr review` 或 `gh api` 发布 inline comment，标注到对应文件的具体行号。
+
+            ### Step 4：发布 PR 汇总评论
+            用 `gh pr comment` 发布以下格式的汇总报告：
+
+            ```
+            ## 📋 本体文档审核报告
+
+            **PR**：#<number> · <title>
+            **变更文件**：<N> 个本体 md 文件
+            **基准**：`main` 分支
+
+            ### A. ID 不可变规则
+            （✓ 通过 / ✗ 错误列表）
+
+            ### B. 跨对象一致性
+            （✓ / ⚠️ / ✗）
+
+            ### C. 跨文件引用存在性
+            （✓ / ✗）
+
+            ### D. 发布前完整性
+            （✓ / ✗）
+
+            ### E. 格式与结构规范
+            （✓ / ✗ / ⚠️）
+
+            ### F. 级联影响评估
+            （✓ 无需级联 / ⚠️ 建议同步更新：<文件列表>）
+
+            ---
+            **结论**
+            - ✗ 错误：M 项 → **阻断合并，必须修复**
+            - ⚠️ 警告：N 项 → 需确认后放行
+            - ✓ 全部通过：可合并
+            ```
+
+            ### Step 5：写入报告文件
+            将完整审核报告写入 `/tmp/ontology-doc-review-report.md`：
+            - 第一行：`HAS_ISSUES`（存在 ✗ 错误）或 `NO_ISSUES`（无错误）
+            - 第二行：空行
+            - 第三行起：完整报告正文
+
+          claude_args: |
+            --allowedTools "Bash,Read,Glob,Grep"
+            --max-turns 30
+
+      - name: Save review report to artifacts repo
+        if: steps.detect.outputs.no_changes == 'false'
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          LINEAR_ID=$(echo "$PR_TITLE ${{ github.event.pull_request.head.ref }}" \
+            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+
+          REPORT_FILE="/tmp/ontology-doc-review-report.md"
+
+          if [ -z "$LINEAR_ID" ]; then
+            echo "No Linear issue ID found, skipping artifact upload"
+            exit 0
+          fi
+
+          if [ ! -f "$REPORT_FILE" ]; then
+            echo "Report file not found, skipping artifact upload"
+            exit 0
+          fi
+
+          if [ -z "${{ secrets.ARTIFACTS_REPO_TOKEN }}" ]; then
+            echo "ARTIFACTS_REPO_TOKEN not set, skipping artifact upload"
+            exit 0
+          fi
+
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
+            /tmp/artifacts-repo
+
+          mkdir -p "/tmp/artifacts-repo/${LINEAR_ID}/ontology-doc-review"
+
+          TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
+          cp "$REPORT_FILE" "/tmp/artifacts-repo/${LINEAR_ID}/ontology-doc-review/${TIMESTAMP}-PR${PR_NUMBER}.md"
+
+          if [ ! -f "/tmp/artifacts-repo/${LINEAR_ID}/README.md" ]; then
+            echo "# ${LINEAR_ID}" > "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "PR: https://github.com/${REPO}/pull/${PR_NUMBER}" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+          fi
+
+          cd /tmp/artifacts-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "${LINEAR_ID}/"
+          git commit -m "chore: ontology-doc-review report for ${LINEAR_ID} PR#${PR_NUMBER}" || echo "Nothing to commit"
+          git push
+        env:
+          GH_TOKEN: ${{ github.token }}
