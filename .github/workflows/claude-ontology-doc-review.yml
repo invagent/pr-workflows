@@ -29,7 +29,11 @@ jobs:
       - name: Detect changed ontology files
         id: detect
         run: |
-          CHANGED=$(git diff --name-only origin/main...HEAD \
+          # 用 PR 的 base..head 比对，确保拿到整个 PR 的所有变更文件
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          CHANGED=$(git diff --name-only "$BASE"..."$HEAD" \
             | grep -E '\.md$' \
             | grep -v '^\.github/' \
             || true)
