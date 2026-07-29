@@ -172,6 +172,50 @@ jobs:
       ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
 ```
 
+**claude-alignment-review.yml** — 本体—PRD—代码全量一致性审查（推荐与 `claude-ontology-review.yml` 并存）
+
+```yaml
+name: Claude Alignment Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    branches:
+      - test  # 只对目标分支为 test 的 PR 触发
+
+jobs:
+  alignment-review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: invagent/pr-workflows/.github/workflows/claude-alignment-review.yml@master
+    with:
+      # 本体仓库（默认 invagent/document，通用本体项目可省略）
+      ontology_repo: 'invagent/document'
+      # 本体在项目内 submodule 路径，或本体仓库内子目录；工作流会自动判断
+      ontology_path: 'docs/ontology/document'
+      # 数据库字典仓库（默认 invagent/fpy-sql-ontology）
+      db_mapping_repo: 'invagent/fpy-sql-ontology'
+      # 数据库字典在项目内 submodule 路径，或字典仓库内子目录
+      db_mapping_path: 'docs/db-mapping'
+      # 可选：指定审查范围，如 "ACT-INVDATA-GEN-004,010"，留空则自动探测
+      feature_scope: ''
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+      SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN }}
+      ARTIFACTS_REPO_TOKEN: ${{ secrets.ARTIFACTS_REPO_TOKEN }}
+      YUNZHIJIA_NOTIFY_URL: ${{ secrets.YUNZHIJIA_NOTIFY_URL }}
+      YUNZHIJIA_ACCESS_TOKEN: ${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}
+```
+
+> **说明**：
+> - 工作流会自动检测 `ontology_path` / `db_mapping_path` 在项目内是否已存在：存在则直接使用（submodule 已随 checkout 拉取），**不会重复 clone**；不存在才 clone 对应的独立仓库。submodule 项目和非 submodule 项目使用同一份配置，无需额外参数。
+> - 若本体仓库或数据库字典仓库与项目仓库不在同一组织，需在 secrets 中传入有读权限的 `ONTOLOGY_REPO_TOKEN` / `DB_MAPPING_REPO_TOKEN`（仅在触发 clone 时生效）。
+> - `with` 块中的参数均有默认值，`fpy-eop-ontology` 等标准本体项目可省略所有 `with` 参数，直接使用默认配置。
+
 **claude.yml** — `@claude` 交互
 
 ```yaml
