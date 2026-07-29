@@ -10,6 +10,7 @@
 | `claude-security.yml` | PR 涉及敏感路径变更 | 深度安全审查，对照 OWASP Top 10 逐项检查 |
 | `claude-ontology-review.yml` | PR 创建、代码更新、标记 Ready（仅 Java 项目） | 本体设计与代码实现一致性审核，审核完成后云之家通知 PR 作者 |
 | `claude-ontology-doc-review.yml` | PR 涉及本体 md 文件变更（跳过 Draft） | 本体文档自身建模规范审核，覆盖 ID 不可变、跨对象一致性、跨文件引用、完整性、格式规范、级联影响六大类检查 |
+| `claude-alignment-review.yml` | PR 到 test 分支（仅 Java 项目） | 本体—PRD—代码全量一致性审查（18 维度），克隆本体仓库和数据库字典仓库做双向比对，输出结构化审查报告（PASS/PASS_WITH_RISKS/FAIL + 追溯矩阵 + Action 调用链），审查完成后云之家通知 PR 作者 |
 | `linear-fix-trigger.yml` | 由 ontology-review job 完成后串联调用（不可独立使用） | 读取 artifacts 仓库本体审核报告，有 🔴 严重问题则触发 Linear Fix-Pr |
 | `autotest-fix-trigger.yml` | 由 autotest job 成功后串联调用（不可独立使用） | 读取 artifacts 仓库端到端测试报告，通过率 < 阈值（默认 90%）则触发 Linear Fix-Bug |
 | `claude.yml` | Issue 或 PR 评论中包含 `@claude` | AI 实时交互，支持代码解释、方案讨论等 |

@@ -1,0 +1,425 @@
+# .github/workflows/claude-alignment-review.yml
+name: Claude Alignment Review
+
+on:
+  workflow_call:
+    inputs:
+      ontology_repo:
+        description: '本体仓库，格式 owner/repo，默认 invagent/document'
+        required: false
+        type: string
+        default: 'invagent/document'
+      ontology_path:
+        description: '本体仓库内的根目录（相对路径），默认仓库根目录'
+        required: false
+        type: string
+        default: '.'
+      db_mapping_repo:
+        description: '数据库字典仓库，格式 owner/repo，默认 invagent/fpy-sql-ontology'
+        required: false
+        type: string
+        default: 'invagent/fpy-sql-ontology'
+      db_mapping_path:
+        description: '数据库字典仓库内的产物目录（含 build/ 和 ssot/），默认 .'
+        required: false
+        type: string
+        default: '.'
+      feature_scope:
+        description: '审查范围描述，如 "ACT-INVDATA-GEN-004,010"，留空则自动探测 PR diff 范围'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      ANTHROPIC_BASE_URL:
+        required: false
+      ANTHROPIC_MODEL:
+        required: false
+      SUBMODULE_TOKEN:
+        description: '拉取 submodule 及本体/数据库字典仓库的通用 token（组织层面统一配置）'
+        required: false
+      ONTOLOGY_REPO_TOKEN:
+        description: '读取本体仓库的 token，优先级高于 SUBMODULE_TOKEN，不传则回退到 SUBMODULE_TOKEN'
+        required: false
+      DB_MAPPING_REPO_TOKEN:
+        description: '读取数据库字典仓库的 token，优先级高于 SUBMODULE_TOKEN，不传则回退到 SUBMODULE_TOKEN'
+        required: false
+      ARTIFACTS_REPO_TOKEN:
+        required: false
+      YUNZHIJIA_NOTIFY_URL:
+        required: false
+      YUNZHIJIA_ACCESS_TOKEN:
+        required: false
+
+jobs:
+  alignment-review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Convert submodule SSH URLs to HTTPS
+        # submodule 地址通常是 git@github.com: SSH 格式，runner 无 SSH key，临时重写为 HTTPS
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
+
+      - name: Checkout project repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # 需要 diff，获取完整历史
+          submodules: recursive # 递归拉取所有 submodule（本体/数据库字典 submodule）
+
+      - name: Detect Java project
+        id: detect-java
+        run: |
+          if find . -name "*.java" -not -path "./.git/*" | head -1 | grep -q "."; then
+            echo "is_java=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_java=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout ontology repository
+        if: steps.detect-java.outputs.is_java == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.ontology_repo }}
+          path: .ontology-src
+          fetch-depth: 1
+          token: ${{ secrets.ONTOLOGY_REPO_TOKEN || secrets.SUBMODULE_TOKEN }}
+
+      - name: Checkout db-mapping repository
+        if: steps.detect-java.outputs.is_java == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.db_mapping_repo }}
+          path: .db-mapping-src
+          fetch-depth: 1
+          token: ${{ secrets.DB_MAPPING_REPO_TOKEN || secrets.SUBMODULE_TOKEN }}
+
+      - name: Resolve effective paths
+        id: paths
+        if: steps.detect-java.outputs.is_java == 'true'
+        run: |
+          ONTOLOGY_ROOT=".ontology-src/${{ inputs.ontology_path }}"
+          DB_MAPPING_ROOT=".db-mapping-src/${{ inputs.db_mapping_path }}"
+
+          # 校验本体根目录存在
+          if [ ! -d "$ONTOLOGY_ROOT" ]; then
+            echo "::warning::Ontology root not found: $ONTOLOGY_ROOT"
+            echo "ontology_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ontology_ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # 校验数据库字典目录存在
+          if [ ! -d "$DB_MAPPING_ROOT" ]; then
+            echo "::warning::DB mapping root not found: $DB_MAPPING_ROOT"
+            echo "db_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "db_ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "ontology_root=$ONTOLOGY_ROOT" >> "$GITHUB_OUTPUT"
+          echo "db_mapping_root=$DB_MAPPING_ROOT" >> "$GITHUB_OUTPUT"
+
+          # 生成 PR diff 摘要（文件列表），供 Claude 快速定位范围
+          git diff --name-only origin/${{ github.base_ref }}...HEAD > /tmp/pr-changed-files.txt || true
+          echo "Changed files in this PR:"
+          cat /tmp/pr-changed-files.txt
+
+      - name: Claude Alignment Review
+        id: claude-alignment-review
+        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            你现在是"本体—PRD—代码一致性审计员"，对本次 Pull Request 做严格、双向、证据化审查。
+            此次任务只读：不要修改任何文件，不要把代码现状反向解释成正确本体，不要替缺失本体规则做猜测。
+
+            ## 基本信息
+
+            - REPO: ${{ github.repository }}
+            - PR NUMBER: ${{ github.event.pull_request.number }}
+            - PR TITLE: ${{ github.event.pull_request.title }}
+            - AUTHOR: ${{ github.event.pull_request.user.login }}
+            - BASE BRANCH: ${{ github.base_ref }}
+            - FEATURE_SCOPE: ${{ inputs.feature_scope }}
+
+            ## 资料路径（已 checkout 到 runner 本地，直接用 Read/Glob/Grep 访问）
+
+            - 本体根目录：`${{ steps.paths.outputs.ontology_root }}`
+            - 数据库字典目录：`${{ steps.paths.outputs.db_mapping_root }}`
+              - 总版字典：`${{ steps.paths.outputs.db_mapping_root }}/build/本体数据字典总版.md`（若存在）
+              - Schema：`${{ steps.paths.outputs.db_mapping_root }}/ssot/schema/schema.json`（若存在）
+            - 项目代码根目录：`.`（当前工作目录）
+            - 本次 PR 变更文件清单：`/tmp/pr-changed-files.txt`
+
+            ## 执行步骤
+
+            ### Step 0：建立输入清单
+
+            先用 Read 读取 `/tmp/pr-changed-files.txt`，了解本次 PR 改动的文件范围。
+            如果 `FEATURE_SCOPE` 非空，以它为审查范围；否则从变更文件列表推断涉及的本体对象。
+
+            用 Glob 探测以下路径，确认资料可用：
+            - `${{ steps.paths.outputs.ontology_root }}/**/*.md`（本体文档）
+            - `${{ steps.paths.outputs.db_mapping_root }}/build/*.md`（数据库总版字典）
+            - `${{ steps.paths.outputs.db_mapping_root }}/ssot/schema/schema.json`
+
+            若本体目录下找不到任何 `.md` 文件，在 PR 留言说明"未找到本体资料，跳过审查"后结束。
+
+            ### Step 1：建立期望模型（读本体）
+
+            按以下顺序读取本体文件（**Grep 优先，按需精读，不要全量读取**）：
+
+            ```
+            ObjectTypes.md / 域 README
+            → *_01_Properties.md + design-notes
+            → *_02_LinkTypes.md
+            → *_03_ValueSets.md
+            → *_04_ActionTypes.md
+            → *_05_Functions*.md + RulePackage
+            → VERSION.md
+            ```
+
+            提取：
+            - 范围内所有生效 Object Type 及主键、语义边界
+            - PRO-*：路径、类型、Cardinality、必填性、允许值、业务约束、是否派生/快照/不可变
+            - LNK-*：from/to、方向、基数、关系属性、写入拥有方
+            - STS-*：状态 code、初/中间/内部/终态、全部允许转换及对应 ACT-*
+            - ACT-*：输入、Guard、Profile applicability、Effect、属性/Link 写回、Side Effect
+            - FN-* / RULE-* / RulePackage：角色、输入、输出、规则严重性、调用顺序
+            - 标记所有 [DEP]、待补充、ID 重复、文档间矛盾
+
+            如果提供了数据库字典，同步从 `build/本体数据字典总版.md` 查出各 PRO-* 的数据库落点（表名、列名、支撑度），无落点的记为 DB_UNMAPPED（软提示）。
+
+            ### Step 2：建立代码模型（读代码）
+
+            **Grep 优先，只读疑问文件**：
+
+            ```
+            Grep: "@OntologyObject\|@OntologyAction\|@OntologyFunction\|@OntologyProperty" in src/
+            Grep: "ACT-\|FN-\|PRO-\|LNK-\|STS-\|RULE-" in src/
+            Grep: "Handler" in src/main/java/**/handlers/
+            Grep: "interface.*Port" in src/main/java/**/ports/
+            Grep: "enum.*Status\|STS-" in src/main/java/
+            Grep: "TraceRecorder\|AuditLogger\|MetricsWriter" in src/main/java/**/handlers/
+            Grep: "ProfileSelectionRules\|selectProfile" in src/main/java/**/handlers/
+            ```
+
+            对 Grep 命中的可疑文件执行 Read，追踪：
+            - 入口 → 鉴权 → Handler → Facts load → Function/Rule → 状态/Link 写回 → 外部调用/Event → 返回
+            - 实际事务边界、乐观锁、业务唯一键、幂等键
+            - 区分"存在但未调用""调用但结果未生效""只写了测试/注释""真实运行路径"
+
+            如果数据库字典存在，同步用以下方式校验数据库落点：
+            ```
+            Grep: "@Column\|column=" in src/main/java/**/adapters/
+            Grep XML mapper: "column=\|property=" in src/main/resources/**/*.xml
+            ```
+            对照 `ssot/schema/schema.json` 中的列清单，列不存在于 schema 的为 P1 错误。
+
+            ### Step 3：双向逐项比对
+
+            **A. 本体 → 代码**：每个本体项是否存在唯一、可执行、可测试的代码落点。
+            **B. 代码 → 本体**：每项业务行为是否有本体/PRD 依据，或明确标为 IMPLEMENTATION_ONLY。
+
+            必须检查以下 18 个维度：
+            1. 对象边界和主键
+            2. 属性路径、类型、基数、必填/可选、精度/舍入、不可变和派生口径；若有数据库字典，校验 schema.json 中对应列是否存在（列不存在为 P1，类型/精度偏差为 P2）
+            3. Link 方向、基数、引用类型、关系属性、拥有方与数据库约束
+            4. ValueSet code、状态转换、终态保护、内部态和废弃态
+            5. Action 是否恰好一个 Handler，Guard/Effect/写回/Side Effect 是否一致
+            6. 是否把纯查询错误建成 Action，或绕过 Action 直接改本体对象
+            7. Function 是否有唯一 canonical entry point，输入/输出/角色/顺序是否一致
+            8. "需外查"函数是否使用同一事实快照后进入纯决策，纯函数是否混入 IO
+            9. Profile L1 路由是否唯一且穷尽，L2 plan、L3 能力和 RulePackage 是否匹配
+            10. RULE-* 是否保留严重性、字段引用和边界，是否有规则被弱化/强化/遗漏
+            11. 外部调用、轮询、回调、Outbox、幂等、事务、乐观锁和补偿
+            12. 跨对象修改是否通过对方 Action/Gateway/Event，而非直接写库
+            13. 权限是否覆盖 actor、action、object/data scope
+            14. Entity/DTO/框架是否泄漏进 ontology/domain
+            15. 审计是否能记录 ACT/FN/RULE/profile、前后状态和 correlation
+            16. 测试是否覆盖允许/禁止状态边、Function Ok/Err、Rule 边界、Handler 零副作用失败、重复/乱序回调和持久化约束
+            17. [DEP] ID 是否被新代码复用，生效 ID 是否重复映射
+            18. 文档中的 Action → Function 顺序是否等于真实调用顺序
+
+            ### Step 4：生成审查报告并输出评论
+
+            偏差分类（用于报告表格）：
+            - MISSING_IMPLEMENTATION / EXTRA_BEHAVIOR / SEMANTIC_MISMATCH / UNTRACEABLE
+            - DEAD_IMPLEMENTATION / CONFLICT / DEPRECATED_USAGE / IMPLEMENTATION_RISK
+            - TEST_GAP / DB_UNMAPPED（软提示）/ DB_MISMATCH / JUSTIFIED_IMPLEMENTATION_ONLY
+
+            严重级别：
+            - P0：越权、金额/税务错误、不可恢复数据破坏、重复外部业务、违法合规
+            - P1：核心对象/状态/Action/Function/Rule 明显偏离，主流程结果错误
+            - P2：边界场景、Link、Profile、幂等/并发、可恢复性或重要测试缺失
+            - P3：追溯、命名、结构或非关键测试问题
+
+            **输出方式**：
+            1. 每个具体代码问题用 `mcp__github_inline_comment__create_inline_comment` 标注到对应代码行
+            2. 整体报告用 `gh pr comment` 添加，格式如下：
+
+            ```markdown
+            # 本体—PRD—代码一致性审查报告
+
+            ## 1. 审查结论
+            - Verdict：PASS / PASS_WITH_RISKS / FAIL
+            - 一句话结论
+            - 审查范围与未覆盖范围
+            - P0/P1/P2/P3 数量
+
+            ## 2. 关键偏差（按 P0 → P3）
+            | 编号 | 严重级别 | 分类 | 本体/PRD期望 | 代码实际 | 影响 | 本体/PRD证据 | 代码/测试证据 | 修正建议 |
+
+            ## 3. 追溯矩阵
+            | 本体类型 | 本体 ID | 名称/语义 | 代码落点 | 测试落点 | 状态 |
+            （状态只允许：ALIGNED / MISSING / MISMATCH / CONFLICT / DEP / OUT_OF_SCOPE）
+
+            ## 4. Action → Function 实际调用链
+            （逐个 Action：期望链 vs 实际链 vs 差异）
+
+            ## 5. 状态机与 Link 校验
+            （缺失/多余转换、终态破坏、Link 基数/拥有方偏差）
+
+            ## 6. 非功能一致性
+            （权限、事务、并发、幂等、Outbox、重试、补偿、审计）
+
+            ## 7. 覆盖率
+            Object/Property/Link/Status transition/Action/Function/Rule/Test evidence
+
+            ## 8. 修正顺序
+            （最小可执行修正顺序，P0/P1 优先）
+            ```
+
+            3. 写入 `/tmp/alignment-review-report.md`：
+               - 第一行必须是 `HAS_ISSUES`（有 P0/P1）或 `NO_ISSUES`
+               - 第二行空行
+               - 第三行起为完整报告正文
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
+            --max-turns 50
+
+      - name: Save review report to artifacts repo
+        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          LINEAR_ID=$(echo "$PR_TITLE ${{ github.event.pull_request.head.ref }}" \
+            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+
+          if [ -z "$LINEAR_ID" ]; then
+            echo "No Linear issue ID found, skipping artifact upload"
+            exit 0
+          fi
+
+          REPORT_FILE="/tmp/alignment-review-report.md"
+          if [ ! -f "$REPORT_FILE" ]; then
+            echo "Report file not found, skipping artifact upload"
+            exit 0
+          fi
+
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
+            /tmp/artifacts-repo
+
+          mkdir -p "/tmp/artifacts-repo/${LINEAR_ID}/alignment-review"
+
+          TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
+          cp "$REPORT_FILE" "/tmp/artifacts-repo/${LINEAR_ID}/alignment-review/${TIMESTAMP}-PR.md"
+
+          if [ ! -f "/tmp/artifacts-repo/${LINEAR_ID}/README.md" ]; then
+            echo "# ${LINEAR_ID}" > "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "PR: https://github.com/${REPO}/pull/${PR_NUMBER}" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+          fi
+
+          cd /tmp/artifacts-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "${LINEAR_ID}/"
+          git commit -m "chore: add alignment review report for ${LINEAR_ID} PR#${PR_NUMBER}" || echo "Nothing to commit"
+          git push
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Notify user via Yunzhijia
+        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true' && steps.claude-alignment-review.outcome == 'success'
+        run: |
+          AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
+
+          if [ -z "$AUTHOR_NAME" ]; then
+            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            exit 0
+          fi
+
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$AUTHOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"你的 PR《${PR_TITLE}》一致性审查已完成，请点击链接查看审查报告\",
+              \"url\": \"$PR_URL\"
+            }"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Notify failure via Yunzhijia
+        if: steps.detect-java.outputs.is_java == 'true' && steps.claude-alignment-review.outcome == 'failure'
+        run: |
+          AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
+
+          if [ -z "$AUTHOR_NAME" ]; then
+            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            exit 0
+          fi
+
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$AUTHOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"你的 PR《${PR_TITLE}》一致性审查执行失败，请点击链接查看详情\",
+              \"url\": \"$RUN_URL\"
+            }" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Skip notice (non-Java project)
+        if: steps.detect-java.outputs.is_java != 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "⏭️ **一致性审查已跳过**：未检测到 Java 项目，本体一致性审查仅适用于 Java 项目。" \
+            --repo ${{ github.repository }} || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Skip notice (ontology not found)
+        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok != 'true'
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "⏭️ **一致性审查已跳过**：未找到本体资料目录（`${{ steps.paths.outputs.ontology_root }}`），请检查 `ontology_repo` / `ontology_path` 配置。" \
+            --repo ${{ github.repository }} || true
+        env:
+          GH_TOKEN: ${{ github.token }}
