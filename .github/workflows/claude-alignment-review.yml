@@ -82,8 +82,23 @@ jobs:
             echo "is_java=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout ontology repository
+      - name: Resolve ontology source
+        id: resolve-ontology
         if: steps.detect-java.outputs.is_java == 'true'
+        run: |
+          SUBMODULE_PATH="${{ inputs.ontology_path }}"
+          if [ -d "$SUBMODULE_PATH" ]; then
+            echo "source=submodule" >> "$GITHUB_OUTPUT"
+            echo "root=$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
+            echo "Ontology found in submodule: $SUBMODULE_PATH"
+          else
+            echo "source=clone" >> "$GITHUB_OUTPUT"
+            echo "root=.ontology-src/$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
+            echo "Ontology not found locally, will clone ${{ inputs.ontology_repo }}"
+          fi
+
+      - name: Checkout ontology repository (non-submodule only)
+        if: steps.detect-java.outputs.is_java == 'true' && steps.resolve-ontology.outputs.source == 'clone'
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.ontology_repo }}
@@ -91,8 +106,23 @@ jobs:
           fetch-depth: 1
           token: ${{ secrets.ONTOLOGY_REPO_TOKEN || secrets.SUBMODULE_TOKEN }}
 
-      - name: Checkout db-mapping repository
+      - name: Resolve db-mapping source
+        id: resolve-db
         if: steps.detect-java.outputs.is_java == 'true'
+        run: |
+          SUBMODULE_PATH="${{ inputs.db_mapping_path }}"
+          if [ -d "$SUBMODULE_PATH" ]; then
+            echo "source=submodule" >> "$GITHUB_OUTPUT"
+            echo "root=$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
+            echo "DB mapping found in submodule: $SUBMODULE_PATH"
+          else
+            echo "source=clone" >> "$GITHUB_OUTPUT"
+            echo "root=.db-mapping-src/$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
+            echo "DB mapping not found locally, will clone ${{ inputs.db_mapping_repo }}"
+          fi
+
+      - name: Checkout db-mapping repository (non-submodule only)
+        if: steps.detect-java.outputs.is_java == 'true' && steps.resolve-db.outputs.source == 'clone'
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.db_mapping_repo }}
@@ -100,12 +130,12 @@ jobs:
           fetch-depth: 1
           token: ${{ secrets.DB_MAPPING_REPO_TOKEN || secrets.SUBMODULE_TOKEN }}
 
-      - name: Resolve effective paths
+      - name: Validate paths and generate PR diff
         id: paths
         if: steps.detect-java.outputs.is_java == 'true'
         run: |
-          ONTOLOGY_ROOT=".ontology-src/${{ inputs.ontology_path }}"
-          DB_MAPPING_ROOT=".db-mapping-src/${{ inputs.db_mapping_path }}"
+          ONTOLOGY_ROOT="${{ steps.resolve-ontology.outputs.root }}"
+          DB_MAPPING_ROOT="${{ steps.resolve-db.outputs.root }}"
 
           # 校验本体根目录存在
           if [ ! -d "$ONTOLOGY_ROOT" ]; then
@@ -115,7 +145,7 @@ jobs:
             echo "ontology_ok=true" >> "$GITHUB_OUTPUT"
           fi
 
-          # 校验数据库字典目录存在
+          # 校验数据库字典目录存在（软提示，不阻断）
           if [ ! -d "$DB_MAPPING_ROOT" ]; then
             echo "::warning::DB mapping root not found: $DB_MAPPING_ROOT"
             echo "db_ok=false" >> "$GITHUB_OUTPUT"
