@@ -63,8 +63,10 @@ jobs:
     steps:
       - name: Convert submodule SSH URLs to HTTPS
         # submodule 地址通常是 git@github.com: SSH 格式，runner 无 SSH key，临时重写为 HTTPS
+        # 同时处理本机私有 SSH 别名（如 git@github-lichuang:）
         run: |
           git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github-lichuang:"
 
       - name: Checkout project repository
         uses: actions/checkout@v4
