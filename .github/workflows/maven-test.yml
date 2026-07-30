@@ -1,0 +1,275 @@
+# .github/workflows/maven-test.yml
+name: Maven Test
+
+on:
+  workflow_call:
+    inputs:
+      java_version:
+        description: 'Java 版本，默认 21'
+        required: false
+        type: string
+        default: '21'
+      maven_args:
+        description: '额外 Maven 参数，如 -pl module -Dtest=XxxTest'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      result:
+        description: 'success 或 failure'
+        value: ${{ jobs.maven-test.outputs.result }}
+    secrets:
+      ARTIFACTS_REPO_TOKEN:
+        required: false
+      YUNZHIJIA_NOTIFY_URL:
+        required: false
+      YUNZHIJIA_ACCESS_TOKEN:
+        required: false
+      SUBMODULE_TOKEN:
+        required: false
+
+jobs:
+  maven-test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      result: ${{ steps.set-result.outputs.result }}
+    steps:
+      - name: Convert submodule SSH URLs to HTTPS
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
+
+      - name: Checkout project repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # diff-cover 需要完整历史计算 PR diff
+          submodules: false
+
+      - name: Fix submodule URLs and init submodules
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git submodule update --init --recursive
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Run Maven verify (test + JaCoCo coverage gate)
+        id: run-tests
+        run: |
+          mvn verify ${{ inputs.maven_args }} \
+            -B \
+            --no-transfer-progress \
+            2>&1 | tee /tmp/mvn-test.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python for diff-cover
+        if: always()
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run diff-cover (incremental coverage report)
+        id: diff-cover
+        if: always()
+        run: |
+          pip install diff-cover --quiet
+
+          # 计算 PR diff 相对于目标分支的增量覆盖率
+          BASE_BRANCH="origin/${{ github.base_ref }}"
+          JACOCO_XML=$(find . -path "*/jacoco/jacoco.xml" | head -1)
+
+          if [ -z "$JACOCO_XML" ]; then
+            echo "diff_summary=⚠️ JaCoCo 报告未生成，跳过增量覆盖率分析" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 生成增量覆盖率报告
+          diff-cover "$JACOCO_XML" \
+            --compare-branch="$BASE_BRANCH" \
+            --diff-range-notation=".." \
+            --markdown-report /tmp/diff-cover-report.md \
+            --minimum-coverage 0 \
+            2>&1 || true
+
+          # 提取覆盖率数字
+          DIFF_COVERAGE=$(grep -oP '\d+(?=% \()' /tmp/diff-cover-report.md | head -1 || echo "N/A")
+          echo "diff_coverage=$DIFF_COVERAGE" >> "$GITHUB_OUTPUT"
+
+          # 读取报告内容供后续评论使用
+          if [ -f /tmp/diff-cover-report.md ]; then
+            echo "has_report=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_report=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set result output
+        id: set-result
+        if: always()
+        run: |
+          if [ "${{ steps.run-tests.outcome }}" == "success" ]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate test summary
+        id: summary
+        if: always()
+        run: |
+          # 从 Surefire 报告提取汇总
+          TOTAL=0; FAILED=0; ERROR=0; SKIPPED=0
+          for f in $(find . -path "*/surefire-reports/TEST-*.xml" 2>/dev/null); do
+            t=$(grep -oP 'tests="\K[0-9]+' "$f" | head -1 || echo 0)
+            fa=$(grep -oP 'failures="\K[0-9]+' "$f" | head -1 || echo 0)
+            e=$(grep -oP 'errors="\K[0-9]+' "$f" | head -1 || echo 0)
+            s=$(grep -oP 'skipped="\K[0-9]+' "$f" | head -1 || echo 0)
+            TOTAL=$((TOTAL+t)); FAILED=$((FAILED+fa)); ERROR=$((ERROR+e)); SKIPPED=$((SKIPPED+s))
+          done
+          PASS=$((TOTAL-FAILED-ERROR-SKIPPED))
+
+          if [ "${{ steps.run-tests.outcome }}" == "success" ]; then
+            STATUS="✅ PASS"
+          else
+            STATUS="❌ FAIL"
+          fi
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "pass=$PASS" >> "$GITHUB_OUTPUT"
+          echo "failed=$((FAILED+ERROR))" >> "$GITHUB_OUTPUT"
+          echo "skipped=$SKIPPED" >> "$GITHUB_OUTPUT"
+
+          # 写报文件（供 artifacts 归档）
+          cat > /tmp/unit-test-report.md << EOF
+          # 单元测试报告
+
+          - **状态**：$STATUS
+          - **总计**：$TOTAL | **通过**：$PASS | **失败**：$((FAILED+ERROR)) | **跳过**：$SKIPPED
+          - **PR**：${{ github.event.pull_request.html_url }}
+          - **Commit**：${{ github.sha }}
+          - **运行时间**：$(date '+%Y-%m-%d %H:%M:%S UTC')
+
+          ## 失败明细
+          EOF
+
+          # 追加失败用例
+          find . -path "*/surefire-reports/TEST-*.xml" | xargs grep -l 'failure\|error' 2>/dev/null | while read f; do
+            echo "### $(basename $f .xml)" >> /tmp/unit-test-report.md
+            grep -oP '(?<=testcase name=")[^"]+' "$f" | head -20 >> /tmp/unit-test-report.md || true
+          done
+
+          if [ "$FAILED" -eq 0 ] && [ "$ERROR" -eq 0 ]; then
+            echo "（无失败用例）" >> /tmp/unit-test-report.md
+          fi
+
+      - name: Comment test result on PR
+        if: always()
+        run: |
+          STATUS="${{ steps.summary.outputs.status }}"
+          TOTAL="${{ steps.summary.outputs.total }}"
+          PASS="${{ steps.summary.outputs.pass }}"
+          FAILED="${{ steps.summary.outputs.failed }}"
+          SKIPPED="${{ steps.summary.outputs.skipped }}"
+          DIFF_COV="${{ steps.diff-cover.outputs.diff_coverage }}"
+          HAS_REPORT="${{ steps.diff-cover.outputs.has_report }}"
+
+          # 构建增量覆盖率部分
+          DIFF_SECTION=""
+          if [ "$HAS_REPORT" == "true" ] && [ -f /tmp/diff-cover-report.md ]; then
+            DIFF_SECTION=$(cat /tmp/diff-cover-report.md)
+          elif [ -n "$DIFF_COV" ]; then
+            DIFF_SECTION="增量覆盖率：**${DIFF_COV}%**"
+          fi
+
+          BODY="## 单元测试结果
+
+**$STATUS** — 总计 $TOTAL | 通过 $PASS | 失败 $FAILED | 跳过 $SKIPPED
+
+> Java ${{ inputs.java_version }} · \`mvn verify ${{ inputs.maven_args }}\` · [查看 Actions 日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+          if [ -n "$DIFF_SECTION" ]; then
+            BODY="$BODY
+
+---
+
+### 增量覆盖率（本次 PR 新增行）
+
+$DIFF_SECTION"
+          fi
+
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --body "$BODY" \
+            --repo ${{ github.repository }} || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Save test report to artifacts repo
+        if: always()
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          LINEAR_ID=$(echo "$PR_TITLE ${{ github.event.pull_request.head.ref }}" \
+            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+
+          if [ -z "$LINEAR_ID" ] || [ -z "${{ secrets.ARTIFACTS_REPO_TOKEN }}" ]; then
+            echo "No Linear ID or token, skipping artifact upload"
+            exit 0
+          fi
+
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
+            /tmp/artifacts-repo
+
+          mkdir -p "/tmp/artifacts-repo/${LINEAR_ID}/unit-test"
+          TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
+          cp /tmp/unit-test-report.md "/tmp/artifacts-repo/${LINEAR_ID}/unit-test/${TIMESTAMP}-run.md"
+
+          if [ ! -f "/tmp/artifacts-repo/${LINEAR_ID}/README.md" ]; then
+            echo "# ${LINEAR_ID}" > "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+            echo "PR: ${{ github.event.pull_request.html_url }}" >> "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
+          fi
+
+          cd /tmp/artifacts-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add "${LINEAR_ID}/"
+          git commit -m "chore: add unit test report for ${LINEAR_ID} PR#${{ github.event.pull_request.number }}" || echo "Nothing to commit"
+          git push
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Notify failure via Yunzhijia
+        if: always() && steps.run-tests.outcome == 'failure'
+        run: |
+          AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
+
+          if [ -z "$AUTHOR_NAME" ]; then
+            exit 0
+          fi
+
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$AUTHOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"你的 PR《${PR_TITLE}》单元测试失败，请点击链接查看详情\",
+              \"url\": \"$RUN_URL\"
+            }" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Fail job if tests failed
+        if: steps.run-tests.outcome == 'failure'
+        run: exit 1
