@@ -179,33 +179,35 @@ jobs:
           SKIPPED="${{ steps.summary.outputs.skipped }}"
           DIFF_COV="${{ steps.diff-cover.outputs.diff_coverage }}"
           HAS_REPORT="${{ steps.diff-cover.outputs.has_report }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          JAVA_VERSION="${{ inputs.java_version }}"
+          MAVEN_ARGS="${{ inputs.maven_args }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # 构建增量覆盖率部分
-          DIFF_SECTION=""
+          # 写入评论文件避免多行字符串 YAML 解析问题
+          cat > /tmp/pr-comment.md << COMMENT_EOF
+          ## 单元测试结果
+
+          **${STATUS}** — 总计 ${TOTAL} | 通过 ${PASS} | 失败 ${FAILED} | 跳过 ${SKIPPED}
+
+          > Java ${JAVA_VERSION} · \`mvn verify ${MAVEN_ARGS}\` · [查看 Actions 日志](${RUN_URL})
+          COMMENT_EOF
+
+          # 追加增量覆盖率
           if [ "$HAS_REPORT" == "true" ] && [ -f /tmp/diff-cover-report.md ]; then
-            DIFF_SECTION=$(cat /tmp/diff-cover-report.md)
+            echo "" >> /tmp/pr-comment.md
+            echo "---" >> /tmp/pr-comment.md
+            echo "" >> /tmp/pr-comment.md
+            echo "### 增量覆盖率（本次 PR 新增行）" >> /tmp/pr-comment.md
+            echo "" >> /tmp/pr-comment.md
+            cat /tmp/diff-cover-report.md >> /tmp/pr-comment.md
           elif [ -n "$DIFF_COV" ]; then
-            DIFF_SECTION="增量覆盖率：**${DIFF_COV}%**"
+            echo "" >> /tmp/pr-comment.md
+            echo "增量覆盖率：**${DIFF_COV}%**" >> /tmp/pr-comment.md
           fi
 
-          BODY="## 单元测试结果
-
-**$STATUS** — 总计 $TOTAL | 通过 $PASS | 失败 $FAILED | 跳过 $SKIPPED
-
-> Java ${{ inputs.java_version }} · \`mvn verify ${{ inputs.maven_args }}\` · [查看 Actions 日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-
-          if [ -n "$DIFF_SECTION" ]; then
-            BODY="$BODY
-
----
-
-### 增量覆盖率（本次 PR 新增行）
-
-$DIFF_SECTION"
-          fi
-
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --body "$BODY" \
+          gh pr comment "$PR_NUMBER" \
+            --body-file /tmp/pr-comment.md \
             --repo ${{ github.repository }} || true
         env:
           GH_TOKEN: ${{ github.token }}
