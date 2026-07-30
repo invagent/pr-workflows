@@ -284,52 +284,43 @@ jobs:
 
             ### Step 4：生成审查报告并输出评论
 
-            偏差分类（用于报告表格）：
+            偏差分类（仅供内部判断，不在报告中展示）：
             - MISSING_IMPLEMENTATION / EXTRA_BEHAVIOR / SEMANTIC_MISMATCH / UNTRACEABLE
             - DEAD_IMPLEMENTATION / CONFLICT / DEPRECATED_USAGE / IMPLEMENTATION_RISK
-            - TEST_GAP / DB_UNMAPPED（软提示）/ DB_MISMATCH / JUSTIFIED_IMPLEMENTATION_ONLY
+            - TEST_GAP / DB_UNMAPPED（软提示）/ DB_MISMATCH
 
-            严重级别：
-            - P0：越权、金额/税务错误、不可恢复数据破坏、重复外部业务、违法合规
-            - P1：核心对象/状态/Action/Function/Rule 明显偏离，主流程结果错误
-            - P2：边界场景、Link、Profile、幂等/并发、可恢复性或重要测试缺失
-            - P3：追溯、命名、结构或非关键测试问题
+            严重级别（报告中用以下标签，不用 P0-P3）：
+            - 🔴 阻断：越权、金额/税务错误、不可恢复数据破坏、重复外部业务、违法合规，或核心对象/状态/Action/Function/Rule 明显偏离导致主流程结果错误——必须修复才能合入
+            - 🟡 警告：边界场景、Link、Profile、幂等/并发、可恢复性或重要测试缺失——建议合入前修复
+            - 🔵 建议：追溯、命名、结构或非关键测试问题——可在后续 PR 处理
 
             **输出方式**：
             1. 每个具体代码问题用 `mcp__github_inline_comment__create_inline_comment` 标注到对应代码行
-            2. 整体报告用 `gh pr comment` 添加，格式如下：
+            2. 整体报告用 `gh pr comment` 添加，格式严格如下（**不得添加其他章节**）：
 
             ```markdown
             # 本体—PRD—代码一致性审查报告
 
-            ## 1. 审查结论
+            ## 1. 结论
             - Verdict：PASS / PASS_WITH_RISKS / FAIL
-            - 一句话结论
-            - 审查范围与未覆盖范围
-            - P0/P1/P2/P3 数量
+            - 一句话结论（含覆盖率摘要，如"Object/Property/Function 覆盖率 100%，1 项 Link 注解缺失"）
+            - 审查范围（一句话）
+            - 🔴 阻断 N | 🟡 警告 N | 🔵 建议 N
 
-            ## 2. 关键偏差（按 P0 → P3）
-            | 编号 | 严重级别 | 分类 | 本体/PRD期望 | 代码实际 | 影响 | 本体/PRD证据 | 代码/测试证据 | 修正建议 |
+            ## 2. 问题清单
+            （**仅列有问题的项**，无问题时写"无"。按 🔴→🟡→🔵 排序）
 
-            ## 3. 追溯矩阵
-            | 本体类型 | 本体 ID | 名称/语义 | 代码落点 | 测试落点 | 状态 |
-            （状态只允许：ALIGNED / MISSING / MISMATCH / CONFLICT / DEP / OUT_OF_SCOPE）
+            | # | 级别 | 问题描述 | 代码位置 | 修正建议 |
+            |---|------|---------|---------|---------|
+            | D-01 | 🟡 | 问题一句话描述 | `文件名.java:行号` | 具体修正动作 |
 
-            ## 4. Action → Function 实际调用链
-            （逐个 Action：期望链 vs 实际链 vs 差异）
+            ## 3. 调用链 / 状态机异常
+            （**仅在有问题时展示**，无问题时写"✅ 无异常"）
 
-            ## 5. 状态机与 Link 校验
-            （缺失/多余转换、终态破坏、Link 基数/拥有方偏差）
-
-            ## 6. 非功能一致性
-            （权限、事务、并发、幂等、Outbox、重试、补偿、审计）
-
-            ## 7. 覆盖率
-            Object/Property/Link/Status transition/Action/Function/Rule/Test evidence
-
-            ## 8. 修正顺序
-            （最小可执行修正顺序，P0/P1 优先）
+            ## 4. 修正顺序
+            （**仅列 🔴 阻断和 🟡 警告**，🔵 建议不列。无阻断/警告时写"无需强制修复"）
             ```
+
 
             3. 写入 `/tmp/alignment-review-report.md`：
                - 第一行必须是 `HAS_ISSUES`（有 P0/P1）或 `NO_ISSUES`
