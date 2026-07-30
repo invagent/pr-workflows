@@ -30,7 +30,7 @@ on:
 
 jobs:
   maven-test:
-    if: github.event.pull_request.draft == false
+    if: ${{ github.event.pull_request.draft == false || github.event_name == 'workflow_call' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
