@@ -123,6 +123,10 @@ jobs:
         id: summary
         if: always()
         run: |
+          # 调试：列出 surefire 报告
+          echo "Surefire reports found:"
+          find . -path "*/surefire-reports/TEST-*.xml" 2>/dev/null || echo "none"
+
           # 从 Surefire 报告提取汇总
           TOTAL=0; FAILED=0; ERROR=0; SKIPPED=0
           for f in $(find . -path "*/surefire-reports/TEST-*.xml" 2>/dev/null); do
