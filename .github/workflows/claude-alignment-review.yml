@@ -61,18 +61,17 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - name: Convert submodule SSH URLs to HTTPS
-        # submodule 地址通常是 git@github.com: SSH 格式，runner 无 SSH key，临时重写为 HTTPS
-        # 同时处理本机私有 SSH 别名（如 git@github-lichuang:）
-        run: |
-          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
-          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github-lichuang:"
-
       - name: Checkout project repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0       # 需要 diff，获取完整历史
-          submodules: recursive # 递归拉取所有 submodule（本体/数据库字典 submodule）
+          submodules: false    # 先不拉 submodule，等重写 URL 后再手动初始化
+
+      - name: Fix submodule URLs and init submodules
+        # actions/checkout 会覆盖 insteadOf 配置，必须在 checkout 之后重新设置
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git submodule update --init --recursive
 
       - name: Detect Java project
         id: detect-java
