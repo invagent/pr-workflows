@@ -240,7 +240,7 @@ jobs:
 
           claude_args: |
             --allowedTools "Bash,Read,Glob,Grep"
-            --max-turns 30
+            --max-turns 120
 
       - name: Save review report to artifacts repo
         if: steps.detect.outputs.no_changes == 'false'
