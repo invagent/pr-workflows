@@ -11,6 +11,10 @@ on:
         required: false
       ARTIFACTS_REPO_TOKEN:
         required: false
+      YUNZHIJIA_NOTIFY_URL:
+        required: false
+      YUNZHIJIA_ACCESS_TOKEN:
+        required: false
 
 jobs:
   ontology-doc-review:
@@ -76,7 +80,7 @@ jobs:
             AUTHOR: ${{ github.event.pull_request.user.login }}
             CHANGED FILES: ${{ steps.detect.outputs.changed_files }}
 
-            你是一名知识本体审核专家。请对本次 PR 中变更的本体文档执行**建模规范审核**，审核依据是下方三份规范全文。
+            你是一名知识本体审核专家。请对本次 PR 中变更的本体文档执行**建模规范审核**，审核依据是下方四份规范全文。
 
             ---
 
@@ -123,18 +127,25 @@ jobs:
             **B4. 业务对象类型ID 归属校验**
             - 属性表中"业务对象类型ID"列必须与文件 frontmatter object: 声明一致，不一致 → ✗ 错误
 
-            ### C. 跨文件引用存在性
+            ### C. 跨文件引用完整性（正向 + 反向）
 
             **C1.** ActionTypes 所有动作的 Guard/Effect 状态值 → 必须在 ValueSets 中存在，否则 ✗
             **C2.** ActionTypes 关系写回段落的链接 ID → 必须在 LinkTypes 中存在，否则 ✗
             **C3.** RulePackage 规则的数据依赖属性路径 → 必须在 Properties 中存在，否则 ✗
             **C4.** LinkTypes 触发动作列的动作 ID → 必须在 ActionTypes 速查表中存在，否则 ✗
+            **C5. 反向回指检测** Properties 文件内不应出现指向后序文件的 ID 回指（如 ACT-/FN-/LNK-/STS- 前缀 ID，或 {Profile}-VL{N}- 规则 ID）。本体要素引用遵循单向原则：后序文件可引用前序文件的 ID/路径，前序文件（Properties）不能反向引用后序文件的 ID。发现回指 → ✗ 错误
+            （注：C5 的权威定义在 ontology-modeling-skills 包 publication-audit.md 的 C 节，此处为 CI 兜底复述；规则措辞如有更新以 skill 侧为准，需同步本 prompt。）
 
-            ### D. 发布前完整性
+            ### D. 发布前完整性 + changelog 规范
 
             **D1.** 所有变更文件的 frontmatter last-modified 必须与本次版本号一致，否则 ✗
             **D2.** 本次版本号必须在根 VERSION.md 中有对应条目，否则 ✗
             **D3.** 所有变更文件不得残留【待补充】占位符，否则 ✗
+            **D4. changelog 已追加** 本次变更（非纯 VERSION.md/README 变更）在 VERSION.md 中必须有对应的变更记录条目，否则 ⚠️ 警告
+            **D5. changelog 7列完整性** VERSION.md 新增条目必须包含以下7列且不为空：# / 类型（[ADD]/[MOD]/[DEP]） / 范围 / 变更文件 / 变更描述 / **兼容性**（breaking/potential/non-breaking） / **影响要素ID**。兼容性列或影响要素ID列缺失或为空 → ✗ 错误
+            **D6. PR 范围与 changelog 记录范围一致** 对比 CHANGED FILES 与 VERSION.md 新增条目的"变更文件"列：
+               - PR 改了但 changelog 未记录的文件 → ✗ 错误（遗漏记录）
+               - changelog 记录了但 PR 未改动的文件 → ✗ 错误（多余记录，通常意味着夹带了非预期变更）
 
             ---
 
@@ -186,13 +197,37 @@ jobs:
 
             ---
 
+            ## 规范四：兼容性分级
+
+            （注：本节的权威定义在 ontology-modeling-skills 包 `update-guardrails.md` §4.4「兼容性分级标准」，此处为 CI 执行侧复述；口径如有更新以 skill 侧为准，需同步本 prompt。判断有歧义时以 skill 侧 §4.4.3 六张明细表为准，不要自行推断。）
+
+            对本次 PR 中每一条 changelog 条目（及其对应的文件变更），依据下表判断兼容性级别，用于填充 D5 检查项，并汇总进最终报告：
+
+            - ✅ **breaking**：删 / 缩（如 Card. 收紧、枚举值删除、约束收紧）/ 改名 / 改ID / 改路径 / 改类型 / 语义变更 / 状态或链接方向变更
+            - ⚠️ **potential**：扩 / 放宽（如 Card. 放宽、枚举值新增）/ 降级（Error→Warning）/ 新增约束规则 / 删除规则
+            - ❌ **non-breaking**：改中文名 / 描述 / 定义 / 分类 / 管理信息 / 新增字段或动作（不影响既有调用）
+
+            判断口径逐要素类型（与 skill 侧 §4.4.3 明细表逐行对齐）：
+            - **Properties**：属性ID改名/重编号、英文路径改名、数据类型变更、Card.收紧(0..1→1..1)、枚举值收紧(删合法值)、约束收紧、格式规范收紧、整行删除或标DEP → breaking；Card.放宽、枚举值扩展、新增约束、约束放宽、格式规范放宽 → potential；所属层级/分类、中文名称、业务定义、同义词、UBL列、管理信息变更、新增字段 → non-breaking
+            - **ValueSets**：状态ID改名/重编号、状态码删除、转移路径删除、整行删除 → breaking；状态码新增、关联动作类型变更、整行新增(含新增终态) → potential；转移路径新增、状态名称/核心定义/备注变更 → non-breaking
+            - **ActionTypes**：动作ID改名/重编号、系统命名改名、Guard收紧、Effect变更、新增强制校验、整行删除 → breaking；Guard放宽、校验放宽、动作类型(Action Type)变更 → potential；状态阶段/业务场景/业务活动变更、整行新增 → non-breaking
+            - **LinkTypes**：链接ID改名/重编号、名称(英文)改名、From/To对象变更或方向反转、基数收紧(1:N→1:1)、适用范围收紧、整行删除 → breaking；基数放宽、触发动作变更、适用范围放宽 → potential；名称(中文)/关联状态变化变更、整行新增 → non-breaking
+            - **Functions**：函数ID改名/重编号、函数名改名、新增必填输入参数、输出结构变更、作用语义变更、整行删除 → breaking；删除输入参数、触发动作变更 → potential；整行新增 → non-breaking
+            - **RulePackage / 内联规则**：规则ID改名、级别升级(Warning→Error)、规则条件收紧、规则引用的字段路径变更 → breaking；规则条件放宽、级别降级(Error→Warning)、新增规则、删除规则 → potential
+
+            一条 changelog 描述若合并了多个操作（"合并同类项"），兼容性取该条内**最高破坏性等级**（breaking > potential > non-breaking）。
+
+            若 changelog 条目的兼容性标注与上表判断不一致 → D5 中标记 ✗ 错误并说明应为何值。
+
+            ---
+
             ## 审核步骤
 
             ### Step 1：读取变更内容
-            对 CHANGED FILES 中每个文件执行 Read，同时用 `git diff origin/main -- <file>` 获取具体 diff。
+            对 CHANGED FILES 中每个文件执行 Read，同时用 `git diff origin/main -- <file>` 获取具体 diff。若 CHANGED FILES 包含 VERSION.md，重点读取本次新增的 changelog 条目全文（用于 D4-D6 及规范四判断）。
 
-            ### Step 2：执行 A～F 各项规范检查
-            按上述规范逐项执行，记录每项结论（✓ / ✗ / ⚠️）。
+            ### Step 2：执行 A～F 各项规范检查 + 规范四兼容性分级
+            按上述规范逐项执行，记录每项结论（✓ / ✗ / ⚠️）。D5 检查时需引用规范四的判断口径逐条核对 changelog 中的兼容性标注是否正确。
 
             ### Step 3：inline comment 标注问题
             每个 ✗ 错误项，使用 `gh pr review` 或 `gh api` 发布 inline comment，标注到对应文件的具体行号。
@@ -213,11 +248,11 @@ jobs:
             ### B. 跨对象一致性
             （✓ / ⚠️ / ✗）
 
-            ### C. 跨文件引用存在性
+            ### C. 跨文件引用完整性（正向+反向）
             （✓ / ✗）
 
-            ### D. 发布前完整性
-            （✓ / ✗）
+            ### D. 发布前完整性 + changelog 规范
+            （✓ / ✗ / ⚠️，含 D4-D6 changelog 检查结果）
 
             ### E. 格式与结构规范
             （✓ / ✗ / ⚠️）
@@ -225,16 +260,36 @@ jobs:
             ### F. 级联影响评估
             （✓ 无需级联 / ⚠️ 建议同步更新：<文件列表>）
 
+            ### G. 兼容性分级汇总
+            breaking ×<N> / potential ×<N> / non-breaking ×<N>
+            （逐条列出：变更描述 → 兼容性级别 → 是否与 changelog 标注一致）
+
             ---
             **结论**
-            - ✗ 错误：M 项 → **阻断合并，必须修复**
+            - 🚫 阻塞级 ✗：M 项 → **阻断合并，必须修复**（A / C / F / D5 / D6）
+            - ⚠️ 警告级 ✗ 与警告：N 项 → 不阻断合并，但需在 PR 中说明或后续修复（B / D1-D4 / E）
             - ⚠️ 警告：N 项 → 需确认后放行
             - ✓ 全部通过：可合并
             ```
 
             ### Step 5：写入报告文件
+
+            **阻塞分级**（依据《本体版本管理用户手册》「CI 做了什么」表）——并非所有 ✗ 都阻断合并：
+
+            | 检查项 | 级别 |
+            |---|---|
+            | A. ID 不可变 | 🚫 阻塞 |
+            | C. 跨文件引用（含 C5 反向回指） | 🚫 阻塞 |
+            | F. 级联影响 | 🚫 阻塞 |
+            | D5. changelog 7 列完整性（兼容性列、影响要素ID列） | 🚫 阻塞 |
+            | D6. PR 范围与 changelog 记录范围一致 | 🚫 阻塞 |
+            | B. 跨对象一致性 | ⚠️ 警告（可 merge） |
+            | D1/D2/D3/D4. last-modified、VERSION.md 已追加、待补充残留、条目覆盖 | ⚠️ 警告（可 merge） |
+            | E. 格式与结构规范 | ⚠️ 警告（可 merge） |
+
             将完整审核报告写入 `/tmp/ontology-doc-review-report.md`：
-            - 第一行：`HAS_ISSUES`（存在 ✗ 错误）或 `NO_ISSUES`（无错误）
+            - 第一行：`HAS_ISSUES`（**上表阻塞级检查项中存在 ✗**）或 `NO_ISSUES`（阻塞级全部通过；警告级即使有 ✗ 也写 `NO_ISSUES`）
+            - **该文件必须写入**，即使全部通过也要写——文件缺失会被门禁判为审核未完成并阻断合并
             - 第二行：空行
             - 第三行起：完整报告正文
 
@@ -292,3 +347,62 @@ jobs:
           git push
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Notify author via Yunzhijia
+        if: steps.detect.outputs.no_changes == 'false' && steps.claude-doc-review.outcome == 'success'
+        run: |
+          if [ -z "${{ secrets.YUNZHIJIA_NOTIFY_URL }}" ]; then
+            echo "YUNZHIJIA_NOTIFY_URL not set, skipping notification"
+            exit 0
+          fi
+
+          AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
+          AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
+
+          if [ -z "$AUTHOR_NAME" ]; then
+            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            exit 0
+          fi
+
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          FIRST_LINE=$(head -1 /tmp/ontology-doc-review-report.md 2>/dev/null || echo "NO_ISSUES")
+          if [ "$FIRST_LINE" = "HAS_ISSUES" ]; then
+            STATUS_TEXT="发现阻断项，请修复后重新提交"
+          else
+            STATUS_TEXT="未发现阻断项"
+          fi
+
+          curl -s -X POST \
+            "${{ secrets.YUNZHIJIA_NOTIFY_URL }}?access_token=${{ secrets.YUNZHIJIA_ACCESS_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"$AUTHOR_NAME\",
+              \"type\": \"link\",
+              \"text\": \"你的 PR《${PR_TITLE}》本体文档审核已完成（${STATUS_TEXT}），请点击链接查看审核结果\",
+              \"url\": \"$PR_URL\"
+            }"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # 阻塞门禁：报告含 HAS_ISSUES 时让 job 失败，拦截 merge。
+      # 需在子项目仓库把本 job 设为 required status check 才能生效。
+      - name: Enforce blocking gate
+        if: always() && steps.detect.outputs.no_changes == 'false'
+        run: |
+          REPORT_FILE="/tmp/ontology-doc-review-report.md"
+
+          if [ ! -f "$REPORT_FILE" ]; then
+            echo "::error::审核报告文件未生成（${REPORT_FILE}），无法确认审核是否完成——按 fail-closed 阻断合并。"
+            echo "::error::常见原因：审核步骤未按 Step 5 写入报告文件，或运行中断。请重跑本 job；若持续失败请检查 workflow 日志。"
+            exit 1
+          fi
+
+          FIRST_LINE=$(head -1 "$REPORT_FILE")
+
+          if [ "$FIRST_LINE" = "HAS_ISSUES" ]; then
+            echo "::error::本体文档审核发现阻断级（✗）问题，禁止合并。详见 PR 评论中的审核报告。"
+            exit 1
+          else
+            echo "本体文档审核未发现阻断级问题，允许合并。"
+          fi
