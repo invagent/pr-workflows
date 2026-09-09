@@ -589,7 +589,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Notify failure via Yunzhijia
-        if: steps.detect-java.outputs.is_java == 'true' && steps.claude-alignment-review.outcome == 'failure'
+        # 必须带 always()：审查步骤失败会让 job 进入 failure 状态，
+        # 不带 always() 的后续步骤会被 GitHub 默认跳过，导致失败静默、作者收不到通知。
+        # cancelled 时 outcome 为 'cancelled'，不满足下面的条件，不会误发。
+        if: always() && steps.detect-java.outputs.is_java == 'true' && steps.claude-alignment-review.outcome == 'failure'
         run: |
           AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
           AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
