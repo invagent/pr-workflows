@@ -81,7 +81,13 @@ jobs:
             PR TITLE: ${{ github.event.pull_request.title }}
             AUTHOR: ${{ github.event.pull_request.user.login }}
 
-            请对这个 Pull Request 进行全面的代码审查，重点关注：
+            ## 审查范围（务必先做）
+
+            先执行 `gh pr diff --repo ${{ github.repository }} ${{ github.event.pull_request.number }}`
+            拿到本次变更，**只审查 diff 涉及的代码**。需要判断上下文时才按需读取相关文件，
+            不要通读整个仓库——那会在大项目上耗尽轮次，最终一条意见都产不出来。
+
+            请针对本次变更进行代码审查，重点关注：
 
             ## 代码质量
             - 代码逻辑是否正确，有无潜在 bug
@@ -108,6 +114,9 @@ jobs:
             请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
             对于整体评价，使用 `gh pr comment` 添加总结性评论。
 
+            **产出优先级**：先形成结论并用 `gh pr comment` 发出总结评论，再补充 inline comment。
+            轮次有限，不要把预算全花在读文件上，避免最终没有任何产出。
+
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
-            --max-turns 20
+            --max-turns 60

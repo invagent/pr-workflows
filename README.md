@@ -30,6 +30,18 @@
 
 ## 接入方式
 
+> **接入前必读，两条都会让工作流静默失效：**
+>
+> 1. **caller job 必须声明 `permissions`**。可复用工作流请求的权限不能超过调用方 job 的授权范围。
+>    仓库默认 workflow 权限通常是 `read`，而本仓库的工作流需要 `pull-requests: write` 与
+>    `id-token: write`，调用方不写 `permissions` 块会直接 `startup_failure`，0 秒退出、无日志。
+>    下面每段示例中的 `permissions` 块<b>不可省略</b>。
+> 2. **接入文件必须先合入默认分支**。`claude-code-action` 会校验 PR 使用的 workflow 文件
+>    与默认分支上的内容是否完全一致，不一致就跳过审查——<b>而 job 结果仍是 `success`</b>，
+>    表现为 CI 绿灯但没有任何审查产出。首次接入时先把 workflow 文件单独合入默认分支，
+>    之后的 PR 审查才会真正执行；此后凡是改动 workflow 文件的 PR 同样会被跳过，属预期行为。
+
+
 Secrets 已在组织层面统一配置，子项目无需重复设置。如需使用独立的 API 密钥，在子项目仓库的 **Settings → Secrets and variables → Actions** 中覆盖以下变量即可：
 
 | 密钥 | 说明 |
@@ -64,6 +76,10 @@ on:
 
 jobs:
   review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     uses: invagent/pr-workflows/.github/workflows/claude-review.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -88,6 +104,10 @@ on:
 
 jobs:
   security:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     uses: invagent/pr-workflows/.github/workflows/claude-security.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -167,6 +187,10 @@ on:
 
 jobs:
   doc-review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     uses: invagent/pr-workflows/.github/workflows/claude-ontology-doc-review.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -236,6 +260,12 @@ on:
 
 jobs:
   claude:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
     uses: invagent/pr-workflows/.github/workflows/claude.yml@master
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
