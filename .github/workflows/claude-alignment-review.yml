@@ -1,31 +1,41 @@
 # .github/workflows/claude-alignment-review.yml
-name: Claude Alignment Review
+#
+# 2026-09-09 起本工作流的职责已变更：
+#   旧：本体—PRD—代码一致性审查（读本体分片 + 数据库字典做双向比对）
+#   新：PR 变更影响分析（只看 diff 与代码本身，产出变更清单、调用链影响、
+#       数据与外部依赖、测试与风险提示）——**不再读本体，不再与数据库字典做任何比对**
+#
+# 文件名与 job id 刻意保持不变：消费方的 `uses:` 引用与 PR check 名（alignment-review /
+# alignment-review）因此不受影响，在途 PR 分支上的旧消费方文件也无需同步修改。
+name: PR Change Impact Analysis
 
 on:
   workflow_call:
     inputs:
+      # ⚠️ 以下 4 个入参已废弃（本工作流不再消费本体与数据库字典）。
+      # 保留声明仅为兼容在途 PR 分支上的旧消费方文件——传了会被忽略，不会报错。
       ontology_repo:
-        description: '本体仓库，格式 owner/repo，默认 invagent/document'
+        description: '【已废弃】本体仓库，保留仅为兼容旧消费方，不再使用'
         required: false
         type: string
         default: 'invagent/document'
       ontology_path:
-        description: '本体仓库内的根目录（相对路径），默认仓库根目录'
+        description: '【已废弃】本体目录，保留仅为兼容旧消费方，不再使用'
         required: false
         type: string
         default: '.'
       db_mapping_repo:
-        description: '数据库字典仓库，格式 owner/repo，默认 invagent/fpy-sql-ontology'
+        description: '【已废弃】数据库字典仓库，保留仅为兼容旧消费方，不再使用'
         required: false
         type: string
         default: 'invagent/fpy-sql-ontology'
       db_mapping_path:
-        description: '数据库字典仓库内的产物目录（含 build/ 和 ssot/），默认 .'
+        description: '【已废弃】数据库字典目录，保留仅为兼容旧消费方，不再使用'
         required: false
         type: string
         default: '.'
       feature_scope:
-        description: '审查范围描述，如 "ACT-INVDATA-GEN-004,010"，留空则自动探测 PR diff 范围'
+        description: '关注点提示（可选）。非空时分析会围绕它展开，留空则由 PR 标题与变更自行推断'
         required: false
         type: string
         default: ''
@@ -37,13 +47,13 @@ on:
       ANTHROPIC_MODEL:
         required: false
       SUBMODULE_TOKEN:
-        description: '拉取 submodule 及本体/数据库字典仓库的通用 token（组织层面统一配置）'
+        description: '【已废弃】不再拉取 submodule，保留仅为兼容旧消费方'
         required: false
       ONTOLOGY_REPO_TOKEN:
-        description: '读取本体仓库的 token，优先级高于 SUBMODULE_TOKEN，不传则回退到 SUBMODULE_TOKEN'
+        description: '【已废弃】保留仅为兼容旧消费方'
         required: false
       DB_MAPPING_REPO_TOKEN:
-        description: '读取数据库字典仓库的 token，优先级高于 SUBMODULE_TOKEN，不传则回退到 SUBMODULE_TOKEN'
+        description: '【已废弃】保留仅为兼容旧消费方'
         required: false
       ARTIFACTS_REPO_TOKEN:
         required: false
@@ -68,13 +78,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0       # 需要 diff，获取完整历史
-          submodules: false    # 先不拉 submodule，等重写 URL 后再手动初始化
-
-      - name: Fix submodule URLs and init submodules
-        # actions/checkout 会覆盖 insteadOf 配置，必须在 checkout 之后重新设置
-        run: |
-          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "git@github.com:"
-          git submodule update --init --recursive
+          submodules: false    # 影响面分析只看主仓库代码，不需要本体/数据库字典 submodule
 
       - name: Detect Java project
         id: detect-java
@@ -85,123 +89,37 @@ jobs:
             echo "is_java=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Resolve ontology source
-        id: resolve-ontology
+      - name: Build change index (diff split + symbols + callers + deps)
+        id: change-index
         if: steps.detect-java.outputs.is_java == 'true'
-        run: |
-          SUBMODULE_PATH="${{ inputs.ontology_path }}"
-          if [ -d "$SUBMODULE_PATH" ]; then
-            echo "source=submodule" >> "$GITHUB_OUTPUT"
-            echo "root=$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
-            echo "Ontology found in submodule: $SUBMODULE_PATH"
-          else
-            echo "source=clone" >> "$GITHUB_OUTPUT"
-            echo "root=.ontology-src/$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
-            echo "Ontology not found locally, will clone ${{ inputs.ontology_repo }}"
-          fi
-
-      - name: Checkout ontology repository (non-submodule only)
-        if: steps.detect-java.outputs.is_java == 'true' && steps.resolve-ontology.outputs.source == 'clone'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.ontology_repo }}
-          path: .ontology-src
-          fetch-depth: 1
-          token: ${{ secrets.ONTOLOGY_REPO_TOKEN || secrets.SUBMODULE_TOKEN }}
-
-      - name: Resolve db-mapping source
-        id: resolve-db
-        if: steps.detect-java.outputs.is_java == 'true'
-        run: |
-          SUBMODULE_PATH="${{ inputs.db_mapping_path }}"
-          if [ -d "$SUBMODULE_PATH" ]; then
-            echo "source=submodule" >> "$GITHUB_OUTPUT"
-            echo "root=$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
-            echo "DB mapping found in submodule: $SUBMODULE_PATH"
-          else
-            echo "source=clone" >> "$GITHUB_OUTPUT"
-            echo "root=.db-mapping-src/$SUBMODULE_PATH" >> "$GITHUB_OUTPUT"
-            echo "DB mapping not found locally, will clone ${{ inputs.db_mapping_repo }}"
-          fi
-
-      - name: Checkout db-mapping repository (non-submodule only)
-        if: steps.detect-java.outputs.is_java == 'true' && steps.resolve-db.outputs.source == 'clone'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.db_mapping_repo }}
-          path: .db-mapping-src
-          fetch-depth: 1
-          token: ${{ secrets.DB_MAPPING_REPO_TOKEN || secrets.SUBMODULE_TOKEN }}
-
-      - name: Validate paths and generate PR diff
-        id: paths
-        if: steps.detect-java.outputs.is_java == 'true'
-        run: |
-          ONTOLOGY_ROOT="${{ steps.resolve-ontology.outputs.root }}"
-          DB_MAPPING_ROOT="${{ steps.resolve-db.outputs.root }}"
-
-          # 校验本体根目录存在
-          if [ ! -d "$ONTOLOGY_ROOT" ]; then
-            echo "::warning::Ontology root not found: $ONTOLOGY_ROOT"
-            echo "ontology_ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "ontology_ok=true" >> "$GITHUB_OUTPUT"
-          fi
-
-          # 校验数据库字典目录存在（软提示，不阻断）
-          if [ ! -d "$DB_MAPPING_ROOT" ]; then
-            echo "::warning::DB mapping root not found: $DB_MAPPING_ROOT"
-            echo "db_ok=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "db_ok=true" >> "$GITHUB_OUTPUT"
-          fi
-
-          echo "ontology_root=$ONTOLOGY_ROOT" >> "$GITHUB_OUTPUT"
-          echo "db_mapping_root=$DB_MAPPING_ROOT" >> "$GITHUB_OUTPUT"
-
-          # 生成 PR diff 摘要（文件列表），供 Claude 快速定位范围
-          git diff --name-only origin/${{ github.base_ref }}...HEAD > /tmp/pr-changed-files.txt || true
-          echo "Changed files in this PR:"
-          cat /tmp/pr-changed-files.txt
-
-      - name: Build review index (ontology shards + diff split + DB precheck)
-        id: review-index
-        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
         env:
-          ONTOLOGY_ROOT: ${{ steps.paths.outputs.ontology_root }}
-          DB_ROOT: ${{ steps.paths.outputs.db_mapping_root }}
           BASE_REF: origin/${{ github.base_ref }}
           OUT: /tmp
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          FEATURE_SCOPE: ${{ inputs.feature_scope }}
         run: |
-          # 生成"审查索引"：把本体分片定位、diff 切分、数据库列预检等重活在 shell 里做完，
-          # 让 Claude 只读索引 + 按行号精读分片，避免全量扫本体导致轮次耗尽。
-          #
-          # 输入经 step env 注入：ONTOLOGY_ROOT / DB_ROOT / BASE_REF / OUT / PR_TITLE / FEATURE_SCOPE
-          # 产物：$OUT/review-brief.txt 及其中列出的各索引文件
+          # 生成"变更索引"：把 diff 切分、变更符号提取、调用点预扫、表与外部依赖识别、
+          # 测试对应关系等机械活在 shell 里做完，Claude 只读索引 + 关键 patch 做判断与叙述。
+          # 本步骤**不读本体、不读数据库字典**。
           set -uo pipefail
 
-          # ONTOLOGY_ROOT / DB_ROOT / BASE_REF / OUT / PR_TITLE / FEATURE_SCOPE 由 step env 注入
-
-          ID_RE='(OBJ|ACT|FN|PRO|LNK|STS|VS|RULE)-[A-Z][A-Z0-9]+(-[A-Z0-9]+)+'
           MAX_PATCH_BYTES=350000
-
           mkdir -p "$OUT"
 
-          # ---------- 1. 变更文件清单（按用途分类） ----------
+          # ---------- 1. 变更清单（按用途分类） ----------
           git diff --name-only "$BASE_REF...HEAD" > "$OUT/pr-changed-files.txt" 2>/dev/null || true
-          grep -E '^src/main/' "$OUT/pr-changed-files.txt" > "$OUT/pr-main-files.txt" 2>/dev/null || true
-          grep -E '^src/test/' "$OUT/pr-changed-files.txt" > "$OUT/pr-test-files.txt" 2>/dev/null || true
-          touch "$OUT/pr-main-files.txt" "$OUT/pr-test-files.txt"
+          grep -E '^src/main/java/'      "$OUT/pr-changed-files.txt" > "$OUT/pr-main-files.txt"   2>/dev/null || true
+          grep -E '^src/test/'           "$OUT/pr-changed-files.txt" > "$OUT/pr-test-files.txt"   2>/dev/null || true
+          grep -E '\.(sql|xml)$'         "$OUT/pr-changed-files.txt" > "$OUT/pr-data-files.txt"   2>/dev/null || true
+          grep -E '(pom\.xml|\.ya?ml|\.properties|^\.github/)' "$OUT/pr-changed-files.txt" > "$OUT/pr-config-files.txt" 2>/dev/null || true
+          touch "$OUT/pr-main-files.txt" "$OUT/pr-test-files.txt" "$OUT/pr-data-files.txt" "$OUT/pr-config-files.txt"
 
-          # ---------- 2. 主代码 diff（超限则截断并给出 stat 全貌） ----------
+          git diff --stat "$BASE_REF...HEAD" > "$OUT/pr-diff-stat.txt" 2>/dev/null || true
+
+          # ---------- 2. 主代码 diff + 按文件切分 ----------
           git diff "$BASE_REF...HEAD" -- 'src/main' 'pom.xml' > "$OUT/.main-diff.raw" 2>/dev/null || true
-          git diff --stat "$BASE_REF...HEAD" -- 'src' 'pom.xml' > "$OUT/pr-diff-stat.txt" 2>/dev/null || true
           PATCH_BYTES=$(wc -c < "$OUT/.main-diff.raw" | tr -d ' ')
           if [ "${PATCH_BYTES:-0}" -gt "$MAX_PATCH_BYTES" ]; then
             {
-              echo "# TRUNCATED=true 原始 ${PATCH_BYTES} 字节，超过 ${MAX_PATCH_BYTES}，此处只含前 ${MAX_PATCH_BYTES} 字节"
+              echo "# TRUNCATED=true 原始 ${PATCH_BYTES} 字节，此处只含前 ${MAX_PATCH_BYTES} 字节"
               echo "# 完整内容请按文件读 pr-diff/ 下的单文件 patch"
               head -c "$MAX_PATCH_BYTES" "$OUT/.main-diff.raw"
             } > "$OUT/pr-main-diff.patch"
@@ -209,7 +127,6 @@ jobs:
             { echo "# TRUNCATED=false 共 ${PATCH_BYTES} 字节"; cat "$OUT/.main-diff.raw"; } > "$OUT/pr-main-diff.patch"
           fi
 
-          # ---------- 3. 按文件切分 diff，便于逐文件精读而不是整包吞 ----------
           python3 - "$OUT" <<'PYSPLIT'
           import os, re, sys
 
@@ -237,149 +154,220 @@ jobs:
 
           index.sort(key=lambda x: -x[2])
           with open(os.path.join(out, "pr-diff-files-index.txt"), "w", encoding="utf-8") as f:
-              f.write("# 主代码 diff 已按文件切分，按新增行数降序。看某文件改动直接读右侧 patch 路径，不要整包读 pr-main-diff.patch\n")
+              f.write("# 主代码 diff 已按文件切分，按新增行数降序。看某文件改动直接读右侧 patch，不要整包读 pr-main-diff.patch\n")
               f.write("# 格式：+新增/-删除\t字节数\t源文件\t->\tpatch 文件\n")
               for path, flat, added, removed, size in index:
                   f.write("+%d/-%d\t%d\t%s\t->\t%s\n" % (added, removed, size, path, os.path.join(out, "pr-diff", flat)))
           print("[diff-split] 切分 %d 个文件级 patch" % len(index))
           PYSPLIT
 
-          # ---------- 4. 本次 PR 涉及的本体 ID（只取主代码新增行，去掉截断噪声） ----------
-          { git diff "$BASE_REF...HEAD" -- 'src/main' 2>/dev/null | grep -E '^\+' ; echo "$PR_TITLE $FEATURE_SCOPE"; } \
-            | grep -ohE "$ID_RE" | sort -u > "$OUT/.ids.raw" || true
-          sort -r "$OUT/.ids.raw" \
-            | awk '{ if (prev != "" && index(prev, $0) == 1) next; prev = $0; print }' \
-            | sort > "$OUT/pr-ontology-ids.txt"
+          # ---------- 3. 变更符号 + 调用点 + 入口 + 数据/外部依赖 + 测试对应 ----------
+          python3 - "$OUT" <<'PYIMPACT'
+          import os, re, subprocess, sys
+          from collections import defaultdict
 
-          # ---------- 5. 本体 ID → 文件:行号 分片索引 ----------
-          grep -rnoE "$ID_RE" --include='*.md' "$ONTOLOGY_ROOT" > "$OUT/.onto-ids.raw" 2>/dev/null || true
+          out = sys.argv[1]
 
-          python3 - "$OUT" "$ONTOLOGY_ROOT" <<'PYINDEX'
-          import os, sys, collections
+          def read_lines(name):
+              p = os.path.join(out, name)
+              return [l.strip() for l in open(p, encoding="utf-8")] if os.path.exists(p) else []
 
-          out, onto_root = sys.argv[1], sys.argv[2]
-          MAX_HITS_PER_ID = 6
+          main_files = [f for f in read_lines("pr-main-files.txt") if f]
+          data_files = [f for f in read_lines("pr-data-files.txt") if f]
+          test_files = [f for f in read_lines("pr-test-files.txt") if f]
 
-          pr_ids = [l.strip() for l in open(os.path.join(out, "pr-ontology-ids.txt"), encoding="utf-8") if l.strip()]
-          pr_set = set(pr_ids)
+          raw_path = os.path.join(out, ".main-diff.raw")
+          raw = open(raw_path, encoding="utf-8", errors="replace").read() if os.path.exists(raw_path) else ""
 
-          hits = collections.defaultdict(list)
-          raw = os.path.join(out, ".onto-ids.raw")
-          if os.path.exists(raw):
-              for line in open(raw, encoding="utf-8", errors="replace"):
-                  parts = line.rstrip("\n").split(":", 2)
-                  if len(parts) != 3:
-                      continue
-                  path, lineno, oid = parts
-                  if oid in pr_set:
-                      hits[oid].append((path, lineno))
+          # --- 3.1 从 diff 变更行里提取方法与类符号（机器初筛，可能误报） ---
+          # 方法名要求首字母小写（Java 惯例），且类型声明行优先判定并跳过——
+          # 否则 `public record AgentProduct(...) {` 会被误当成名为 AgentProduct 的方法。
+          DECL_RE = re.compile(
+              r'^[+-]\s*(?:public|protected|private|final|abstract|static|sealed|\s)*'
+              r'(?:class|interface|enum|record|@interface)\s+(\w+)')
+          METHOD_RE = re.compile(
+              r'^[+-]\s*(?:@\w+\s*)*(?:public|protected|private|static|final|abstract|synchronized|\s)*'
+              r'[\w.<>\[\],?\s]+\s+([a-z]\w*)\s*\([^;]*\)\s*(?:throws [\w.,\s]+)?\s*\{')
+          SKIP = {"if", "for", "while", "switch", "catch", "return", "new", "try", "do", "else", "synchronized"}
 
-          with open(os.path.join(out, "ontology-id-index.txt"), "w", encoding="utf-8") as f:
-              f.write("# 本次 PR 涉及的本体 ID -> 本体文档位置（file:line）。\n")
-              f.write("# 用 grep -A7 '^## <ID>' 按需查询，禁止整读本文件，更禁止全量读本体文档。\n")
-              for oid in sorted(hits):
-                  locs = hits[oid]
-                  f.write("\n## %s  （命中 %d 处）\n" % (oid, len(locs)))
-                  for path, lineno in locs[:MAX_HITS_PER_ID]:
+          cur_file, changed_methods, changed_types = None, defaultdict(set), defaultdict(set)
+          for line in raw.splitlines():
+              m = re.match(r"\+\+\+ b/(\S+)", line)
+              if m:
+                  cur_file = m.group(1)
+                  continue
+              if not cur_file or not cur_file.endswith(".java"):
+                  continue
+              cm = DECL_RE.match(line)
+              if cm:
+                  changed_types[cur_file].add(cm.group(1))
+                  continue
+              mm = METHOD_RE.match(line)
+              if mm and mm.group(1) not in SKIP:
+                  changed_methods[cur_file].add(mm.group(1))
+
+          with open(os.path.join(out, "changed-symbols.txt"), "w", encoding="utf-8") as f:
+              f.write("# 本次 diff 中出现在增删行上的方法与类型（正则初筛，可能有误报/漏报，作为线索用）\n")
+              for path in sorted(set(changed_methods) | set(changed_types)):
+                  f.write("\n## %s\n" % path)
+                  if changed_types.get(path):
+                      f.write("类型：%s\n" % ", ".join(sorted(changed_types[path])))
+                  if changed_methods.get(path):
+                      f.write("方法：%s\n" % ", ".join(sorted(changed_methods[path])))
+
+          # --- 3.2 调用点预扫：这些方法在全仓被谁调用 ---
+          all_methods = sorted({m for s in changed_methods.values() for m in s})
+          callers = defaultdict(list)
+          if all_methods:
+              pattern = r'\.(' + '|'.join(re.escape(m) for m in all_methods) + r')\s*\('
+              try:
+                  res = subprocess.run(["grep", "-rnoE", pattern, "src/"],
+                                       capture_output=True, text=True)
+                  for line in res.stdout.splitlines():
+                      parts = line.split(":", 2)
+                      if len(parts) != 3:
+                          continue
+                      path, lineno, hit = parts
+                      name = hit.strip().lstrip(".").rstrip("(").strip()
+                      callers[name].append((path, lineno))
+              except Exception as e:
+                  print("::warning::调用点扫描失败: %s" % e)
+
+          # 按主代码调用点数降序，只详列前 MAX_METHODS 个——调用方越多的方法影响面越大，
+          # 尾部那些零调用点的访问器/私有方法列出来只是噪声。
+          MAX_METHODS = 80
+          # 通用短名（of / get / build …）在全仓命中成百上千处，几乎全是同名无关方法，
+          # 拿它们统计影响面只会淹没真正的调用链，单独归一节即可。
+          GENERIC_NAMES = {"of", "get", "set", "run", "build", "apply", "test", "value", "name", "id",
+                           "from", "valueOf", "create", "execute", "handle", "accept", "call", "close",
+                           "start", "stop", "toString", "equals", "hashCode", "compareTo", "size",
+                           "isEmpty", "stream", "map", "filter", "add", "put", "remove", "contains"}
+          # 黑名单穷举不完（isBlank 这类工具方法同样命中上百处），再补一条通用规则：
+          # 一个 PR 改动的业务方法不该有 50+ 个主代码调用方，超了基本可断定是同名工具方法。
+          def main_hits_of(n):
+              return len([h for h in callers.get(n, []) if h[0].startswith("src/main/")])
+
+          generic = [n for n in all_methods
+                     if n in GENERIC_NAMES or len(n) <= 3 or main_hits_of(n) > 50]
+          specific = [n for n in all_methods if n not in generic]
+          ranked = sorted(specific,
+                          key=lambda n: -len([h for h in callers.get(n, []) if h[0].startswith("src/main/")]))
+          with open(os.path.join(out, "caller-index.txt"), "w", encoding="utf-8") as f:
+              f.write("# 变更方法 -> 全仓调用点（grep 初筛，同名方法会混入，需按上下文判断）\n")
+              f.write("# 按主代码调用点数降序。没有调用点的方法要么是入口（被框架调用）、要么是 record 访问器，\n")
+              f.write("# 要么可能是死代码——后两种只在明显可疑时才值得写进报告\n")
+              for name in ranked[:MAX_METHODS]:
+                  hits = callers.get(name, [])
+                  main_hits = [h for h in hits if h[0].startswith("src/main/")]
+                  test_hits = [h for h in hits if h[0].startswith("src/test/")]
+                  f.write("\n## %s  （主代码 %d 处 / 测试 %d 处）\n" % (name, len(main_hits), len(test_hits)))
+                  for path, lineno in main_hits[:10]:
                       f.write("%s:%s\n" % (path, lineno))
-                  if len(locs) > MAX_HITS_PER_ID:
-                      f.write("... 其余 %d 处省略\n" % (len(locs) - MAX_HITS_PER_ID))
+                  if len(main_hits) > 10:
+                      f.write("... 其余 %d 处主代码调用省略\n" % (len(main_hits) - 10))
+              if len(ranked) > MAX_METHODS:
+                  f.write("\n# 另有 %d 个变更方法主代码调用点为 0 或很少，未详列：%s\n"
+                          % (len(ranked) - MAX_METHODS, ", ".join(ranked[MAX_METHODS:])))
+              if generic:
+                  f.write("\n# 以下变更方法是通用短名，全仓同名命中过多、调用点统计不可信，未统计：%s\n"
+                          % ", ".join(sorted(generic)))
 
-          missing = sorted(pr_set - set(hits))
-          with open(os.path.join(out, "ontology-ids-missing.txt"), "w", encoding="utf-8") as f:
-              f.write("# 主代码中出现、但本体文档检索不到的 ID —— MISSING_IN_ONTOLOGY 候选，需逐条确认是否为示例/拼写噪声\n")
-              for oid in missing:
-                  f.write(oid + "\n")
+          # --- 3.3 入口识别：改动是否触及对外入口 ---
+          # 只认注解与 implements 这类硬特征，且先剔除注释行——
+          # 按类名猜（Orchestrator/Sweeper）或全文匹配会把注释里提到的词也算成入口。
+          ENTRY_PATTERNS = [
+              (r'@(Rest)?Controller\b|@(Get|Post|Put|Delete|Patch|Request)Mapping\b', 'HTTP 接口'),
+              (r'@Scheduled\b|implements\s+ScheduledJob\b', '定时任务'),
+              (r'@KafkaListener\b|@RabbitListener\b|@EventListener\b', '消息/事件消费'),
+              (r'@FeignClient\b|\bRestTemplate\b|\bWebClient\b|\bHttpClient\b|\bHttpUtil\b|\bOkHttp\w*\b', '外部 HTTP/RPC 调用'),
+              (r'@Transactional\b', '事务边界'),
+          ]
+          with open(os.path.join(out, "entrypoints-and-deps.txt"), "w", encoding="utf-8") as f:
+              f.write("# 变更文件里命中的入口与依赖特征（按注解/implements 硬特征匹配，已剔除注释行）\n")
+              for path in main_files:
+                  if not os.path.exists(path):
+                      continue
+                  code = "\n".join(l for l in open(path, encoding="utf-8", errors="replace").read().splitlines()
+                                   if not l.lstrip().startswith(("*", "//", "/*")))
+                  hits = [label for pat, label in ENTRY_PATTERNS if re.search(pat, code)]
+                  if hits:
+                      f.write("%s\t%s\n" % (path, "、".join(sorted(set(hits)))))
 
-          dirs = sorted({os.path.dirname(p) for locs in hits.values() for p, _ in locs})
-          with open(os.path.join(out, "ontology-shard-files.txt"), "w", encoding="utf-8") as f:
-              f.write("# 本次审查相关的本体分片（按目录分组）。补充上下文时只在这些文件里 grep，不要扩散到整个本体库。\n")
-              for d in dirs:
-                  f.write("\n## %s\n" % d)
-                  try:
-                      for name in sorted(os.listdir(d)):
-                          if name.endswith(".md"):
-                              full = os.path.join(d, name)
-                              f.write("%s  (%d bytes)\n" % (full, os.path.getsize(full)))
-                  except OSError:
-                      pass
+          # --- 3.4 数据依赖：涉及哪些表、什么操作（只罗列，不与任何字典比对） ---
+          # 不拿 SELECT 后面的词当表名（那是列），CREATE TABLE 要吃掉 IF NOT EXISTS，
+          # 再用关键字黑名单 + "全大写视为 SQL 函数/常量" 兜住剩余噪声。
+          TABLE_RE = re.compile(
+              r'\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?)'
+              r'\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?', re.I)
+          SQL_NOISE = {"select", "where", "set", "values", "as", "on", "id", "dual", "if", "not",
+                       "exists", "table", "into", "from", "join", "and", "or", "case", "when",
+                       "then", "else", "end", "order", "group", "by", "limit", "offset", "union"}
+          ops = defaultdict(set)
+          for path in data_files:
+              if not os.path.exists(path):
+                  continue
+              text = open(path, encoding="utf-8", errors="replace").read()
+              for kw, table in TABLE_RE.findall(text):
+                  if table.lower() in SQL_NOISE or table.isupper():
+                      continue
+                  k = kw.upper().split()[0]
+                  verb = {"FROM": "查", "JOIN": "查", "INSERT": "增",
+                          "UPDATE": "改", "DELETE": "删", "CREATE": "建表"}.get(k, k)
+                  ops[table].add(verb)
+          with open(os.path.join(out, "data-touchpoints.txt"), "w", encoding="utf-8") as f:
+              f.write("# 变更的 SQL / mapper XML 里涉及的表与操作（grep 初筛，仅罗列现状，不做任何字典比对）\n")
+              for table in sorted(ops):
+                  f.write("%s\t%s\n" % (table, "/".join(sorted(ops[table]))))
 
-          print("[index] PR ID %d 个，本体命中 %d 个，未命中 %d 个，分片目录 %d 个"
-                % (len(pr_ids), len(hits), len(missing), len(dirs)))
-          PYINDEX
+          # --- 3.5 测试对应关系：改了主代码类，有没有同名测试 ---
+          with open(os.path.join(out, "test-coverage-map.txt"), "w", encoding="utf-8") as f:
+              f.write("# 主代码类 -> 同名测试是否存在 / 本次是否一起改（按文件名匹配，非覆盖率）\n")
+              changed_test_names = {os.path.basename(t) for t in test_files}
+              for path in main_files:
+                  if path.endswith("package-info.java"):
+                      continue      # 包声明文件没有测试可言，列出来只是噪声
+                  cls = os.path.basename(path).replace(".java", "")
+                  test_name = cls + "Test.java"
+                  found = subprocess.run(["find", "src/test", "-name", test_name],
+                                         capture_output=True, text=True).stdout.strip()
+                  if not found:
+                      state = "❌ 无同名测试"
+                  elif test_name in changed_test_names:
+                      state = "✅ 存在且本次一起改了"
+                  else:
+                      state = "⚠️ 存在但本次未改"
+                  f.write("%s\t%s\n" % (path, state))
 
-          # ---------- 6. MyBatis mapper 列 × schema.json 预检 ----------
-          python3 - "$OUT" "$DB_ROOT" <<'PYDB'
-          import json, os, re, sys
+          print("[impact] 变更方法 %d 个，命中调用点 %d 个，涉及表 %d 张"
+                % (len(all_methods), sum(len(v) for v in callers.values()), len(ops)))
+          PYIMPACT
 
-          out, db_root = sys.argv[1], sys.argv[2]
-          schema_path = os.path.join(db_root, "ssot", "schema", "schema.json")
-          report = open(os.path.join(out, "db-column-check.txt"), "w", encoding="utf-8")
-
-          changed = [l.strip() for l in open(os.path.join(out, "pr-changed-files.txt"), encoding="utf-8") if l.strip()]
-          xmls = [p for p in changed if p.endswith(".xml") and "/mapper/" in p and os.path.exists(p)]
-
-          if not os.path.exists(schema_path):
-              report.write("# schema.json 不存在（%s），跳过数据库列预检，DB 相关问题降级为软提示\n" % schema_path)
-              report.close()
-              print("[db-check] schema.json 缺失，跳过")
-              sys.exit(0)
-
-          schema = json.load(open(schema_path, encoding="utf-8"))
-          tables = {name: {c.get("name") for c in tbl.get("columns", [])}
-                    for name, tbl in schema.get("tables", {}).items()}
-
-          report.write("# MyBatis mapper 列名 x schema.json 预检（机器初筛，结论需模型复核：别名/函数列/未识别表会误报）\n")
-          report.write("# schema.json 表数：%d；本次变更 mapper XML：%d 个\n" % (len(tables), len(xmls)))
-
-          tbl_re = re.compile(r'\b(?:from|into|update|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)', re.I)
-          col_re = re.compile(r'column\s*=\s*"([^"]+)"')
-          suspect_total = 0
-
-          for xml in xmls:
-              text = open(xml, encoding="utf-8", errors="replace").read()
-              used_tables = sorted({t for t in tbl_re.findall(text) if t in tables})
-              cols = sorted(set(col_re.findall(text)))
-              known = set()
-              for t in used_tables:
-                  known |= tables[t]
-              suspects = [c for c in cols if c not in known]
-              suspect_total += len(suspects)
-              report.write("\n## %s\n" % xml)
-              report.write("命中表：%s\n" % (", ".join(used_tables) if used_tables else "（未识别到 schema 内的表，本文件结论不可信）"))
-              report.write("column 属性 %d 个，schema 内不存在 %d 个\n" % (len(cols), len(suspects)))
-              if suspects:
-                  report.write("疑似缺列：%s\n" % ", ".join(suspects))
-
-          report.close()
-          print("[db-check] 变更 mapper %d 个，疑似缺列 %d 个" % (len(xmls), suspect_total))
-          PYDB
-
-          # ---------- 7. 审查摘要（模型第一轮只需读这一个文件） ----------
-          MISSING_COUNT=$(( $(wc -l < "$OUT/ontology-ids-missing.txt" | tr -d ' ') - 1 ))
+          # ---------- 4. 汇总摘要 ----------
           {
-            echo "# 审查索引摘要（下列路径均已就绪，可直接读）"
+            echo "# 变更影响索引摘要（下列路径均已就绪，可直接读）"
             echo "变更文件总数：$(wc -l < "$OUT/pr-changed-files.txt" | tr -d ' ')"
-            echo "主代码文件数：$(wc -l < "$OUT/pr-main-files.txt" | tr -d ' ')   清单：$OUT/pr-main-files.txt"
-            echo "测试文件数：  $(wc -l < "$OUT/pr-test-files.txt" | tr -d ' ')   清单：$OUT/pr-test-files.txt"
-            echo "本体 ID 数：  $(wc -l < "$OUT/pr-ontology-ids.txt" | tr -d ' ')   清单：$OUT/pr-ontology-ids.txt"
-            echo "缺件候选数：  ${MISSING_COUNT}   清单：$OUT/ontology-ids-missing.txt"
+            echo "主代码(java)：$(wc -l < "$OUT/pr-main-files.txt" | tr -d ' ')   清单：$OUT/pr-main-files.txt"
+            echo "测试：        $(wc -l < "$OUT/pr-test-files.txt" | tr -d ' ')   清单：$OUT/pr-test-files.txt"
+            echo "SQL/XML：     $(wc -l < "$OUT/pr-data-files.txt" | tr -d ' ')   清单：$OUT/pr-data-files.txt"
+            echo "配置：        $(wc -l < "$OUT/pr-config-files.txt" | tr -d ' ')   清单：$OUT/pr-config-files.txt"
             echo ""
             echo "索引文件："
-            echo "  $OUT/pr-diff-files-index.txt   按文件切分的 diff 索引（按新增行降序）"
-            echo "  $OUT/pr-diff/<flat>.patch      单文件 diff"
-            echo "  $OUT/ontology-id-index.txt     本体 ID -> 文档 file:line（用 grep -A7 '^## <ID>' 查，勿整读）"
-            echo "  $OUT/ontology-shard-files.txt  相关本体分片文件清单"
-            echo "  $OUT/db-column-check.txt       mapper 列 x schema.json 预检"
-            echo "  $OUT/pr-diff-stat.txt          整体 diff 规模"
-          } > "$OUT/review-brief.txt"
-          cat "$OUT/review-brief.txt"
+            echo "  $OUT/pr-diff-files-index.txt    按文件切分的 diff 索引（按新增行降序）"
+            echo "  $OUT/pr-diff/<flat>.patch       单文件 diff"
+            echo "  $OUT/changed-symbols.txt        变更涉及的类与方法"
+            echo "  $OUT/caller-index.txt           变更方法 -> 全仓调用点"
+            echo "  $OUT/entrypoints-and-deps.txt   入口与外部依赖特征（HTTP/定时/消息/事务）"
+            echo "  $OUT/data-touchpoints.txt       涉及的表与操作"
+            echo "  $OUT/test-coverage-map.txt      主代码类与同名测试的对应关系"
+            echo "  $OUT/pr-diff-stat.txt           整体 diff 规模"
+          } > "$OUT/change-brief.txt"
+          cat "$OUT/change-brief.txt"
 
-          rm -f "$OUT/.ids.raw" "$OUT/.onto-ids.raw" "$OUT/.main-diff.raw"
+          rm -f "$OUT/.main-diff.raw"
 
-      - name: Claude Alignment Review
+      - name: Claude Change Impact Analysis
         id: claude-alignment-review
-        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
+        if: steps.detect-java.outputs.is_java == 'true'
         uses: anthropics/claude-code-action@v1
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
@@ -387,8 +375,16 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
-            你现在是"本体—PRD—代码一致性审计员"，对本次 Pull Request 做严格、双向、证据化审查。
-            本任务只读：不要修改任何文件，不要把代码现状反向解释成正确本体，不要替缺失的本体规则做猜测。
+            你是"PR 变更影响分析员"。任务是把本次 Pull Request 改了什么、会波及什么，讲清楚给评审人看。
+            本任务只读：不要修改任何文件。
+
+            ## 范围限定（硬性）
+
+            - **不做本体一致性检查**：不要读 `docs/ontology/`，不要查任何 `ACT-*` / `FN-*` / `PRO-*` / `LNK-*` / `STS-*` / `RULE-*` 本体条目，
+              也不要判断代码是否符合本体。代码里出现这类 ID 时，当作普通标识符看待即可。
+            - **不做数据库字典比对**：不要读 `docs/db-mapping/`，不要打开 `schema.json`，
+              不要判断某个列/表是否"存在于字典中"。涉及的表只做罗列，不做存在性或一致性判定。
+            - 上述两件事已有专门的门禁与流程负责，本工作流不重复。
 
             ## 基本信息
 
@@ -397,128 +393,101 @@ jobs:
             - PR TITLE: ${{ github.event.pull_request.title }}
             - AUTHOR: ${{ github.event.pull_request.user.login }}
             - BASE BRANCH: ${{ github.base_ref }}
-            - FEATURE_SCOPE: ${{ inputs.feature_scope }}
+            - 关注点（可为空）: ${{ inputs.feature_scope }}
 
-            ## 已备好的审查索引（本次审查的唯一入口）
+            ## 已备好的索引（先读这些，别自己从头扫仓库）
 
-            工作流已在 runner 上把"本体分片定位、diff 切分、数据库列预检"预处理完毕，**第一轮先读 `/tmp/review-brief.txt`**：
+            - `/tmp/change-brief.txt`           摘要与各索引路径（第一轮必读）
+            - `/tmp/pr-diff-files-index.txt`    主代码 diff 按文件切分索引（按新增行降序）
+            - `/tmp/pr-diff/<flat>.patch`       单文件 diff
+            - `/tmp/changed-symbols.txt`        变更涉及的类与方法（正则初筛）
+            - `/tmp/caller-index.txt`           变更方法 → 全仓调用点（grep 初筛）
+            - `/tmp/entrypoints-and-deps.txt`   入口与依赖特征（HTTP 接口 / 定时任务 / 消息消费 / 外部调用 / 事务）
+            - `/tmp/data-touchpoints.txt`       涉及的表与操作（增删改查）
+            - `/tmp/test-coverage-map.txt`      主代码类与同名测试的对应关系
+            - `/tmp/pr-changed-files.txt` 及分类清单、`/tmp/pr-diff-stat.txt`
 
-            - `/tmp/review-brief.txt`            索引摘要与各文件路径（必读）
-            - `/tmp/pr-diff-files-index.txt`     主代码 diff 按文件切分的索引（按新增行降序）
-            - `/tmp/pr-diff/<flat>.patch`        单个文件的 diff
-            - `/tmp/pr-main-files.txt`           主代码变更清单
-            - `/tmp/pr-test-files.txt`           测试变更清单
-            - `/tmp/pr-ontology-ids.txt`         本次 PR 主代码涉及的本体 ID
-            - `/tmp/ontology-id-index.txt`       本体 ID → 本体文档 `file:line`（分片定位表）
-            - `/tmp/ontology-ids-missing.txt`    代码引用但本体检索不到的 ID（缺件候选）
-            - `/tmp/ontology-shard-files.txt`    本次相关的本体分片文件清单（同域兄弟文件）
-            - `/tmp/db-column-check.txt`         mapper 列 × schema.json 的机器初筛结果
-            - `/tmp/pr-diff-stat.txt`            整体 diff 规模
+            索引里的调用点、符号、表名都是 **grep/正则初筛**，同名方法会混入、也可能漏。
+            写进报告前按需读对应 patch 或源码确认，但**不要为了穷尽而逐个核实**——拿不准的写"待确认"，不要死磕。
 
-            资料根目录（需要时才用）：
-            - 本体根目录：`${{ steps.paths.outputs.ontology_root }}`
-            - 数据库字典：`${{ steps.paths.outputs.db_mapping_root }}`（schema：`ssot/schema/schema.json`）
-            - 项目代码根目录：`.`
+            ## 取证纪律
 
-            ## 取证纪律（硬性，违反会导致轮次耗尽、审查失败）
+            1. 一次 Bash 调用里用 `;` 串多条 `cat`/`grep`/`sed`，不要一条命令一次调用。
+            2. 按 `/tmp/pr-diff-files-index.txt` 优先读新增行最多的主代码 patch；测试文件按需抽查，不必逐个读。
+            3. **边分析边写**：每完成一个章节，立刻用 `cat >>` 追加进 `/tmp/pr-impact-report.md`，
+               不要攒到最后一次性写——这样即使中途中断，也有部分结果可用。
+            4. 不确定的结论标注"待确认"并说明缺什么信息，不要靠猜补齐，也不要为一个细节反复查证。
 
-            1. **禁止全量读本体**。本体单文件常达 100–200KB，整读必然耗尽轮次。正确姿势：
-               `grep -A7 '^## <ID>' /tmp/ontology-id-index.txt` 拿到 `file:line` → `sed -n '<line-40>,<line+40>p' <file>` 读片段。
-               需要扩展上下文时，只在 `/tmp/ontology-shard-files.txt` 列出的文件内 grep，不要扩散到整个本体库。
-            2. **禁止整读 `/tmp/pr-main-diff.patch`**。按 `/tmp/pr-diff-files-index.txt` 逐文件读 `/tmp/pr-diff/*.patch`，优先新增行数最多的主代码文件；测试文件按需抽查。
-            3. **合并命令**。一次 Bash 调用里用 `;` 串起多条 grep/sed/cat，不要一条命令一次调用。
-            4. **轮次预算（总上限 120）**：≤70 轮完成取证；第 71 轮起停止取证、开始撰写结论；
-               **最迟第 100 轮必须完成 `gh pr comment` 与 `/tmp/alignment-review-report.md` 写盘**。
-               取证不完备也照常出报告，把没查到的项在报告中标注"未取证"——绝不允许因为没查完而不输出报告。
-            5. inline comment 最多 10 条，只标 🔴 / 🟡 问题；其余问题只写进报告表格。
+            ## 分析内容（四块，逐块产出）
 
-            ## 审查步骤
+            ### 1. 变更清单与规模
+            按主代码 / 测试 / SQL·XML / 配置分类，给出文件数与增删行数，并用一两句话说明这次改动**在做什么**。
+            对主要文件逐条给出"改了什么"的一句话说明（只列有实质改动的，重命名/格式化归并成一行）。
 
-            ### Step 1　定范围（约 3 轮）
-            一次 Bash 读完 `/tmp/review-brief.txt`、`/tmp/ontology-ids-missing.txt`、`/tmp/ontology-shard-files.txt`、`/tmp/pr-diff-files-index.txt` 的头部，
-            确定本次涉及的本体域、核心 Action 与主要落地文件。`FEATURE_SCOPE` 非空时以它为准，否则以 PR 标题 + 主代码变更推断。
+            ### 2. 调用链影响
+            - 新增或修改的**对外入口**：HTTP 接口、定时任务、消息/事件消费（依据 `entrypoints-and-deps.txt`）
+            - 被修改或删除的方法**有哪些调用点**、这些调用方会受什么影响（依据 `caller-index.txt`）
+            - 主代码里**没有任何调用点**的新增方法：是入口（被框架反射调用）还是可能的死代码
+            - 一句话结论：本次改动的波及半径（只影响自身模块 / 波及 N 个上游调用方 / 触及对外契约）
 
-            ### Step 2　建立期望模型（按分片读本体）
-            对核心 `ACT-*` / `FN-*` / `STS-*` / `PRO-*` / `RULE-*` 按纪律 1 读分片，提取：
-            Guard、Effect、属性与 Link 写回、Side Effect、状态转换全集、Function 调用顺序、Rule 严重性与边界、`[DEP]` 标记。
+            ### 3. 数据与外部依赖
+            - 涉及哪些数据库表、各是什么操作（增/删/改/查/建表），依据 `data-touchpoints.txt`
+            - 有无新增或改动的外部 HTTP/RPC 调用，调用了谁
+            - 有无事务边界、批量操作、定时扫描这类需要留意的数据行为
+            - **只描述现状，不判断这些表/列是否符合任何字典或规范**
 
-            ### Step 3　建立代码模型（按分片读 diff）
-            按纪律 2 逐文件读 patch，追踪：入口 → 鉴权 → Handler → 事实加载 → Function/Rule → 状态与 Link 写回 → 外部调用/Event → 返回。
-            区分"存在但未调用""调用但结果未生效""只写了测试或注释""真实运行路径"。
+            ### 4. 测试与风险提示
+            - 依据 `test-coverage-map.txt`：哪些主代码改动有对应测试且本次一起改了、哪些没有
+            - 风险点，按以下三级标注：
+              - 🔴 高：可能导致线上功能不可用、数据错误、外部业务重复执行
+              - 🟡 中：边界场景、并发/幂等、失败处理不完整、关键路径缺测试
+              - 🔵 低：可读性、命名、非关键测试缺失
+            - 风险要有依据（指到具体文件与行），不要泛泛而谈"建议加强测试"
 
-            ### Step 4　双向比对
-            **A. 本体 → 代码**：每个本体项是否有唯一、可执行、可测试的代码落点。
-            **B. 代码 → 本体**：每项业务行为是否有本体/PRD 依据，否则须标为 IMPLEMENTATION_ONLY。
+            ## 输出
 
-            #### 必查 8 项（每项都必须给出结论，作为覆盖率依据）
-            1. Action ↔ Handler 是否恰好一一对应，Guard / Effect / 属性与 Link 写回 / Side Effect 是否与本体一致
-            2. 状态机：`STS-*` 允许转换、终态保护、内部态与废弃态；代码里是否存在非法跃迁
-            3. Property：路径、类型、基数、必填、精度与舍入、不可变与派生口径；数据库落点以 `/tmp/db-column-check.txt` 为初筛线索
-               （**该文件是机器初筛，表名未识别或列别名会误报，必须核实 mapper 与 schema.json 后才写进报告**；确认列不存在 = 🔴，类型/精度偏差 = 🟡）
-            4. Function / Rule：canonical entry point 是否唯一，调用顺序是否等于文档，规则严重性是否被弱化、强化或遗漏
-            5. 缺件判定：逐条过 `/tmp/ontology-ids-missing.txt`，区分"本体真缺（MISSING_IN_ONTOLOGY，🔴 且必须在报告中单列）"与"示例值 / 拼写噪声"
-            6. 事务边界、幂等键、业务唯一键、乐观锁，外部调用与回调的重复及乱序处理、补偿路径
-            7. 分层与依赖方向：Entity / DTO / 框架类不得泄漏进 ontology、domain 包；跨对象修改须走对方 Action / Gateway / Event
-            8. 测试覆盖：允许与禁止的状态边、Function Ok/Err、Rule 边界、Handler 失败时零副作用、重复与乱序回调、持久化约束
-
-            #### 条件触发 6 项（仅当 diff 命中对应线索时才查；不命中就不查，也不要写进报告）
-            - Link 一致性　　　→ diff 出现 `LNK-`，或有关联表写入
-            - Profile / RulePackage 路由　→ 出现 `Profile`、`selectProfile`、`RulePackage`
-            - 权限与数据范围　→ 出现 `@PreAuthorize`、`apiKey`、`tenant`、鉴权拦截器
-            - 审计与可观测　　→ 出现 `AuditLogger`、`TraceRecorder`、`Metrics`
-            - 跨对象写入　　　→ 出现对其它聚合的 Repository / Mapper 写操作
-            - `[DEP]` 复用　　→ 本体分片命中行含 `[DEP]`
-
-            ## Step 5　生成审查报告并输出评论
-
-            偏差分类（仅供内部判断，不在报告中展示）：
-            - MISSING_IMPLEMENTATION / EXTRA_BEHAVIOR / SEMANTIC_MISMATCH / UNTRACEABLE
-            - DEAD_IMPLEMENTATION / CONFLICT / DEPRECATED_USAGE / IMPLEMENTATION_RISK
-            - TEST_GAP / DB_UNMAPPED（软提示）/ DB_MISMATCH
-
-            严重级别（报告中用以下标签，不用 P0-P3）：
-            - 🔴 阻断：越权、金额/税务错误、不可恢复数据破坏、重复外部业务、违法合规，或核心对象/状态/Action/Function/Rule 明显偏离导致主流程结果错误——必须修复才能合入
-            - 🟡 警告：边界场景、Link、Profile、幂等/并发、可恢复性或重要测试缺失——建议合入前修复
-            - 🔵 建议：追溯、命名、结构或非关键测试问题——可在后续 PR 处理
-
-            **输出方式**：
-            1. 每个具体代码问题用 `mcp__github_inline_comment__create_inline_comment` 标注到对应代码行（上限 10 条）
-            2. 整体报告用 `gh pr comment` 添加，格式严格如下（**不得添加其他章节**）：
+            1. 全程用 `cat >>` 增量写入 `/tmp/pr-impact-report.md`，**首行必须是** `HAS_RISKS`（有 🔴/🟡）或 `NO_RISKS`，
+               第二行空行，第三行起为报告正文，格式如下（不要额外加章节）：
 
             ```markdown
-            # 本体—PRD—代码一致性审查报告
+            # PR 变更影响分析
 
-            ## 1. 结论
-            - Verdict：PASS / PASS_WITH_RISKS / FAIL
-            - 一句话结论（含覆盖率摘要，如"Object/Property/Function 覆盖率 100%，1 项 Link 注解缺失"）
-            - 审查范围（一句话）
-            - 🔴 阻断 N | 🟡 警告 N | 🔵 建议 N
+            ## 1. 概览
+            - 变更规模：N 个文件（主代码 A / 测试 B / SQL·XML C / 配置 D），+X/-Y 行
+            - 这次改动在做什么：一到两句话
+            - 波及半径：一句话
+            - 风险：🔴 N | 🟡 N | 🔵 N
 
-            ## 2. 问题清单
-            （**仅列有问题的项**，无问题时写"无"。按 🔴→🟡→🔵 排序）
+            ## 2. 变更清单
+            | 文件 | 类型 | 改了什么 |
+            |---|---|---|
+            | `路径` | 新增/修改/删除 | 一句话 |
 
-            | # | 级别 | 问题描述 | 代码位置 | 修正建议 |
-            |---|------|---------|---------|---------|
-            | D-01 | 🟡 | 问题一句话描述 | `文件名.java:行号` | 具体修正动作 |
+            ## 3. 调用链影响
+            （对外入口、调用点受影响情况、无调用点的新增方法；无影响时写"仅影响自身模块，无外部调用方"）
 
-            ## 3. 调用链 / 状态机异常
-            （**仅在有问题时展示**，无问题时写"✅ 无异常"）
+            ## 4. 数据与外部依赖
+            | 表 / 外部依赖 | 操作 | 出现位置 |
+            |---|---|---|
 
-            ## 4. 修正顺序
-            （**仅列 🔴 阻断和 🟡 警告**，🔵 建议不列。无阻断/警告时写"无需强制修复"）
+            （无数据库与外部调用改动时写"无"）
+
+            ## 5. 测试与风险提示
+            | # | 级别 | 风险 | 位置 | 建议 |
+            |---|---|---|---|---|
+            | R-01 | 🟡 | 一句话 | `文件:行` | 具体动作 |
+
+            测试对应情况：一到两句话
             ```
 
-            3. 写入 `/tmp/alignment-review-report.md`：
-               - 第一行必须是 `HAS_ISSUES`（有 🔴/🟡）或 `NO_ISSUES`
-               - 第二行空行
-               - 第三行起为完整报告正文
+            2. 报告写完后，用 `gh pr comment` 把 `/tmp/pr-impact-report.md` 的**正文部分**（去掉首行标记与空行）发到 PR。
 
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
-            --max-turns 120
+            --allowedTools "Bash,Read,Glob,Grep,LS"
+            --max-turns 60
 
       - name: Append model usage stats to review comment
-        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true' && steps.claude-alignment-review.outcome == 'success'
+        if: steps.detect-java.outputs.is_java == 'true' && steps.claude-alignment-review.outcome == 'success'
         env:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -526,9 +495,9 @@ jobs:
           CNY_RATE: '7.2'
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 把本次审查的模型消耗统计追加到 Claude 刚发的那条审查报告评论结尾。
+          # 把本次分析的模型消耗统计追加到 Claude 刚发的那条报告评论结尾。
           # 数据来自 claude-code-action 落盘的执行日志（result 事件的 usage / total_cost_usd）。
-          # 取不到数据或找不到报告评论时只告警、不失败——统计是附加信息，不该阻断审查流程。
+          # 取不到数据或找不到报告评论时只告警、不失败——统计是附加信息，不该阻断流程。
           EXEC_FILE="${EXEC_FILE:-}"
           if [ -z "$EXEC_FILE" ] || [ ! -f "$EXEC_FILE" ]; then
             EXEC_FILE="${RUNNER_TEMP}/claude-execution-output.json"
@@ -590,7 +559,6 @@ jobs:
           if result and isinstance(result.get("total_cost_usd"), (int, float)):
               cost = float(result["total_cost_usd"])
           else:
-              # 回退：各模型 costUSD 求和
               for m in ((result or {}).get("modelUsage") or {}).values():
                   if isinstance(m, dict) and isinstance(m.get("costUSD"), (int, float)):
                       cost += float(m["costUSD"])
@@ -600,7 +568,6 @@ jobs:
               print("::warning::执行日志里没有可用的 token 用量，跳过模型统计")
               sys.exit(0)
 
-          # 占比按降序，低于 0.1% 的并入其他，避免刷一堆 0.0%
           parts = []
           for name, n in sorted(buckets.items(), key=lambda kv: -kv[1]):
               pct = n * 100.0 / total
@@ -612,7 +579,7 @@ jobs:
                    f"token 占比：{'，'.join(parts)}】")
           print(stats)
 
-          # ---------- 2. 找到本次审查报告评论并追加 ----------
+          # ---------- 2. 找到本次报告评论并追加 ----------
           try:
               raw = subprocess.run(
                   ["gh", "api", f"repos/{repo}/issues/{pr}/comments", "--paginate"],
@@ -624,14 +591,13 @@ jobs:
 
           target = None
           for c in comments:
-              if "本体—PRD—代码一致性审查报告" in (c.get("body") or ""):
+              if "PR 变更影响分析" in (c.get("body") or ""):
                   target = c          # 取最后一条匹配的（本次刚发的）
           if target is None:
-              print("::warning::未找到审查报告评论，统计未追加")
+              print("::warning::未找到影响分析报告评论，统计未追加")
               sys.exit(0)
 
           body = target["body"].rstrip()
-          # 重跑同一条评论时替换旧统计，不叠加
           head, sep, _ = body.partition("\n\n---\n" + MARKER)
           if sep:
               body = head.rstrip()
@@ -648,8 +614,9 @@ jobs:
               print(f"::warning::追加统计失败（{e.stderr.strip()[:200]}）")
           PYSTATS
 
-      - name: Save review report to artifacts repo
-        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
+      - name: Save impact report to artifacts repo
+        # 带 always()：分析步骤即使因超轮次失败，报告也可能已增量写了一部分，值得归档
+        if: always() && steps.detect-java.outputs.is_java == 'true'
         run: |
           PR_NUMBER="${{ github.event.pull_request.number }}"
           REPO="${{ github.repository }}"
@@ -663,7 +630,7 @@ jobs:
             exit 0
           fi
 
-          REPORT_FILE="/tmp/alignment-review-report.md"
+          REPORT_FILE="/tmp/pr-impact-report.md"
           if [ ! -f "$REPORT_FILE" ]; then
             echo "Report file not found, skipping artifact upload"
             exit 0
@@ -673,10 +640,10 @@ jobs:
             "https://x-access-token:${{ secrets.ARTIFACTS_REPO_TOKEN }}@github.com/invagent/develop-workflow-artifacts.git" \
             /tmp/artifacts-repo
 
-          mkdir -p "/tmp/artifacts-repo/${LINEAR_ID}/alignment-review"
+          mkdir -p "/tmp/artifacts-repo/${LINEAR_ID}/impact-report"
 
           TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
-          cp "$REPORT_FILE" "/tmp/artifacts-repo/${LINEAR_ID}/alignment-review/${TIMESTAMP}-PR.md"
+          cp "$REPORT_FILE" "/tmp/artifacts-repo/${LINEAR_ID}/impact-report/${TIMESTAMP}-PR.md"
 
           if [ ! -f "/tmp/artifacts-repo/${LINEAR_ID}/README.md" ]; then
             echo "# ${LINEAR_ID}" > "/tmp/artifacts-repo/${LINEAR_ID}/README.md"
@@ -688,19 +655,19 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           git add "${LINEAR_ID}/"
-          git commit -m "chore: add alignment review report for ${LINEAR_ID} PR#${PR_NUMBER}" || echo "Nothing to commit"
+          git commit -m "chore: add impact report for ${LINEAR_ID} PR#${PR_NUMBER}" || echo "Nothing to commit"
           git push
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Notify user via Yunzhijia
-        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true' && steps.claude-alignment-review.outcome == 'success'
+        if: steps.detect-java.outputs.is_java == 'true' && steps.claude-alignment-review.outcome == 'success'
         run: |
           AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
           AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
 
           if [ -z "$AUTHOR_NAME" ]; then
-            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            echo "No name found for $AUTHOR_LOGIN, skipping notification"
             exit 0
           fi
 
@@ -713,23 +680,22 @@ jobs:
             -d "{
               \"name\": \"$AUTHOR_NAME\",
               \"type\": \"link\",
-              \"text\": \"你的 PR《${PR_TITLE}》一致性审查已完成，请点击链接查看审查报告\",
+              \"text\": \"你的 PR《${PR_TITLE}》变更影响分析已完成，请点击链接查看报告\",
               \"url\": \"$PR_URL\"
             }"
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Notify failure via Yunzhijia
-        # 必须带 always()：审查步骤失败会让 job 进入 failure 状态，
+        # 必须带 always()：分析步骤失败会让 job 进入 failure 状态，
         # 不带 always() 的后续步骤会被 GitHub 默认跳过，导致失败静默、作者收不到通知。
-        # cancelled 时 outcome 为 'cancelled'，不满足下面的条件，不会误发。
         if: always() && steps.detect-java.outputs.is_java == 'true' && steps.claude-alignment-review.outcome == 'failure'
         run: |
           AUTHOR_LOGIN="${{ github.event.pull_request.user.login }}"
           AUTHOR_NAME=$(gh api users/$AUTHOR_LOGIN --jq '.name // empty' 2>/dev/null || true)
 
           if [ -z "$AUTHOR_NAME" ]; then
-            echo "No Chinese name found for $AUTHOR_LOGIN, skipping notification"
+            echo "No name found for $AUTHOR_LOGIN, skipping notification"
             exit 0
           fi
 
@@ -742,7 +708,7 @@ jobs:
             -d "{
               \"name\": \"$AUTHOR_NAME\",
               \"type\": \"link\",
-              \"text\": \"你的 PR《${PR_TITLE}》一致性审查执行失败，请点击链接查看详情\",
+              \"text\": \"你的 PR《${PR_TITLE}》变更影响分析执行失败，请点击链接查看详情\",
               \"url\": \"$RUN_URL\"
             }" || true
         env:
@@ -752,16 +718,7 @@ jobs:
         if: steps.detect-java.outputs.is_java != 'true'
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
-            --body "⏭️ **一致性审查已跳过**：未检测到 Java 项目，本体一致性审查仅适用于 Java 项目。" \
-            --repo ${{ github.repository }} || true
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Skip notice (ontology not found)
-        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok != 'true'
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --body "⏭️ **一致性审查已跳过**：未找到本体资料目录（`${{ steps.paths.outputs.ontology_root }}`），请检查 `ontology_repo` / `ontology_path` 配置。" \
+            --body "⏭️ **变更影响分析已跳过**：未检测到 Java 项目。" \
             --repo ${{ github.repository }} || true
         env:
           GH_TOKEN: ${{ github.token }}
