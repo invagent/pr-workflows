@@ -90,16 +90,23 @@ jobs:
             exit 0
           fi
 
-          # 生成增量覆盖率报告
+          # 生成增量覆盖率报告。
+          # 注意参数：--markdown-report 已废弃、--minimum-coverage 已被移除，
+          # 旧写法会以 unrecognized arguments 直接退出，配合末尾的 || true 变成静默失效：
+          # 报告不生成、PR 评论里没有覆盖率段落，而 job 仍然是绿的。
           diff-cover "$JACOCO_XML" \
             --compare-branch="$BASE_BRANCH" \
             --diff-range-notation=".." \
-            --markdown-report /tmp/diff-cover-report.md \
-            --minimum-coverage 0 \
+            --format "markdown:/tmp/diff-cover-report.md" \
+            --fail-under 0 \
             2>&1 || true
 
-          # 提取覆盖率数字
-          DIFF_COVERAGE=$(grep -oP '\d+(?=% \()' /tmp/diff-cover-report.md | head -1 || echo "N/A")
+          # 提取覆盖率数字。报告格式随 diff-cover 版本变动，逐级回退，全部落空才记 N/A
+          DIFF_COVERAGE=$(grep -oP '(?<=\*\*Coverage\*\*: )\d+(\.\d+)?' /tmp/diff-cover-report.md 2>/dev/null | head -1 || true)
+          if [ -z "$DIFF_COVERAGE" ]; then
+            DIFF_COVERAGE=$(grep -oP '\d+(\.\d+)?(?=%)' /tmp/diff-cover-report.md 2>/dev/null | tail -1 || true)
+          fi
+          [ -z "$DIFF_COVERAGE" ] && DIFF_COVERAGE="N/A"
           echo "diff_coverage=$DIFF_COVERAGE" >> "$GITHUB_OUTPUT"
 
           # 读取报告内容供后续评论使用
