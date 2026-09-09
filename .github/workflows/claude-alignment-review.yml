@@ -39,6 +39,13 @@ on:
         required: false
         type: string
         default: ''
+      comment_mode:
+        description: >-
+          报告怎么呈现。standalone：模型自己往 PR 发一条报告评论（默认，单独接入时用）；
+          aggregated：不发评论，上传 pr-check-impact artifact 交给 pr-summary 汇总成一条
+        required: false
+        type: string
+        default: 'standalone'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -480,7 +487,10 @@ jobs:
             测试对应情况：一到两句话
             ```
 
-            2. 报告写完后，用 `gh pr comment` 把 `/tmp/pr-impact-report.md` 的**正文部分**（去掉首行标记与空行）发到 PR。
+            2. 报告写完后按当前模式投递（当前模式：${{ inputs.comment_mode }}）：
+               - `standalone`：用 `gh pr comment` 把 `/tmp/pr-impact-report.md` 的**正文部分**
+                 （去掉首行标记与空行）发到 PR。
+               - `aggregated`：**不要发任何 PR 评论**，报告文件写完即可，后续步骤会收走它。
 
           claude_args: |
             --allowedTools "Bash,Read,Glob,Grep,LS"
@@ -492,6 +502,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXEC_FILE: ${{ steps.claude-alignment-review.outputs.execution_file }}
+          COMMENT_MODE: ${{ inputs.comment_mode }}
           CNY_RATE: '7.2'
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -579,7 +590,17 @@ jobs:
                    f"token 占比：{'，'.join(parts)}】")
           print(stats)
 
-          # ---------- 2. 找到本次报告评论并追加 ----------
+          # ---------- 2. 投递统计 ----------
+          # 汇总模式下本工作流不发评论，统计追加到报告文件末尾，随 artifact 一起进汇总评论
+          if os.environ.get("COMMENT_MODE") == "aggregated":
+              try:
+                  with open("/tmp/pr-impact-report.md", "a", encoding="utf-8") as f:
+                      f.write("\n\n---\n" + stats + "\n")
+                  print("模型统计已追加到报告文件")
+              except Exception as e:
+                  print(f"::warning::统计写入报告文件失败（{e}）")
+              sys.exit(0)
+
           try:
               raw = subprocess.run(
                   ["gh", "api", f"repos/{repo}/issues/{pr}/comments", "--paginate"],
@@ -613,6 +634,39 @@ jobs:
           except subprocess.CalledProcessError as e:
               print(f"::warning::追加统计失败（{e.stderr.strip()[:200]}）")
           PYSTATS
+
+      - name: Collect impact result (aggregated mode)
+        # 带 always()：分析超轮次失败时报告也可能写了一部分，汇总里如实呈现比整块消失好
+        if: always() && inputs.comment_mode == 'aggregated'
+        run: |
+          mkdir -p /tmp/pr-check-impact
+          REPORT=/tmp/pr-impact-report.md
+
+          if [ ! -f "$REPORT" ]; then
+            echo "⚠️ 未产出分析报告，请查看 Actions 日志" > /tmp/pr-check-impact/status.txt
+            echo "分析步骤未生成 /tmp/pr-impact-report.md。" > /tmp/pr-check-impact/body.md
+            exit 0
+          fi
+
+          # 首行是约定的 HAS_RISKS / NO_RISKS 标记，用来定图标；风险计数取报告概览里那行
+          FIRST=$(head -1 "$REPORT" | tr -d '\r')
+          RISK_LINE=$(grep -m1 '风险：' "$REPORT" | sed 's/^[[:space:]]*-[[:space:]]*风险：//' || true)
+
+          ICON="✅"
+          [ "$FIRST" = "HAS_RISKS" ] && ICON="🟡"
+
+          echo "${ICON} ${RISK_LINE:-已完成}" > /tmp/pr-check-impact/status.txt
+
+          # 正文去掉首行标记与重复的一级标题（汇总评论的折叠块自带标题）
+          tail -n +2 "$REPORT" | sed '/^# PR 变更影响分析$/d' | sed '1{/^$/d}' > /tmp/pr-check-impact/body.md
+
+      - name: Publish check artifact (aggregated mode)
+        if: always() && inputs.comment_mode == 'aggregated'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-check-impact
+          path: /tmp/pr-check-impact
+          retention-days: 1
 
       - name: Save impact report to artifacts repo
         # 带 always()：分析步骤即使因超轮次失败，报告也可能已增量写了一部分，值得归档

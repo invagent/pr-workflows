@@ -14,6 +14,13 @@ on:
         required: false
         type: string
         default: ''
+      comment_mode:
+        description: >-
+          结果怎么呈现。standalone：自己往 PR 发一条评论（默认，单独接入时用）；
+          aggregated：不发评论，改为上传 pr-check-test artifact 交给 pr-summary 汇总成一条
+        required: false
+        type: string
+        default: 'standalone'
     outputs:
       result:
         description: 'success 或 failure'
@@ -213,11 +220,37 @@ jobs:
             echo "增量覆盖率：**${DIFF_COV}%**" >> /tmp/pr-comment.md
           fi
 
-          gh pr comment "$PR_NUMBER" \
+          # 汇总模式下这一行进汇总表格，所以要短、要能一眼看出过没过
+          COV_PART=""
+          if [ -n "$DIFF_COV" ] && [ "$DIFF_COV" != "N/A" ]; then
+            COV_PART=" · 增量覆盖率 ${DIFF_COV}%"
+          fi
+          echo "${STATUS} · ${PASS}/${TOTAL}${COV_PART}" > /tmp/check-status.txt
+
+      - name: Comment test result (standalone mode)
+        if: always() && inputs.comment_mode != 'aggregated'
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
             --body-file /tmp/pr-comment.md \
             --repo ${{ github.repository }} || true
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Upload check result (aggregated mode)
+        if: always() && inputs.comment_mode == 'aggregated'
+        run: |
+          mkdir -p /tmp/pr-check-test
+          cp /tmp/check-status.txt /tmp/pr-check-test/status.txt
+          # 汇总评论自带"单元测试详情"标题，正文里的一级标题去掉免得重复
+          sed '1{/^## 单元测试结果$/d}' /tmp/pr-comment.md | sed '1{/^$/d}' > /tmp/pr-check-test/body.md
+
+      - name: Publish check artifact (aggregated mode)
+        if: always() && inputs.comment_mode == 'aggregated'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-check-test
+          path: /tmp/pr-check-test
+          retention-days: 1
 
       - name: Save test report to artifacts repo
         if: always()

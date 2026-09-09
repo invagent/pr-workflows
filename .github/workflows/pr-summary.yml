@@ -1,0 +1,117 @@
+# .github/workflows/pr-summary.yml
+#
+# 把同一个 PR 上多个检查工作流的结果合并成**一条**评论，重跑时原地更新而非新增。
+#
+# 为什么需要它：三个检查各自发评论时，PR 每 push 一次就多三条，很快淹没讨论。
+# GitHub Actions 的 job 只能在同一个 workflow 文件内互相 needs，所以消费方需要把
+# 各检查与本工作流编排进同一个 pr-checks.yml，本工作流作为最后一个 job 运行。
+#
+# 数据怎么来：各检查工作流在 comment_mode=aggregated 时不自己发评论，改为上传
+# 名为 pr-check-<kind> 的 artifact，内含两个文件：
+#   status.txt  单行结论，进汇总表格，如 "✅ 213/213 · 覆盖率 100%"
+#   body.md     详情正文，进折叠块
+# 缺哪个检查就少哪一行，不影响其余部分——某个 job 挂了不该让汇总也没了。
+name: PR Checks Summary
+
+on:
+  workflow_call:
+    inputs:
+      title:
+        description: '汇总评论的标题'
+        required: false
+        type: string
+        default: 'PR 检查汇总'
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read      # download-artifact 读取同一 run 的产物
+    steps:
+      - name: Download check artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/checks
+          pattern: pr-check-*
+        continue-on-error: true   # 三个检查全挂时没有任何 artifact，此时仍要发一条说明
+
+      - name: Compose and upsert summary comment
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: ${{ inputs.title }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          MARKER='<!-- pr-workflows:summary -->'
+          OUT=/tmp/summary.md
+
+          # 展示顺序固定：先看过没过，再看代码质量，最后看影响面
+          ORDER="test review impact"
+          declare -A LABEL=( [test]="单元测试" [review]="代码审查" [impact]="变更影响" )
+
+          {
+            echo "$MARKER"
+            echo "## ${TITLE}"
+            echo
+            echo "| 检查 | 结果 |"
+            echo "|---|---|"
+          } > "$OUT"
+
+          FOUND=0
+          for kind in $ORDER; do
+            STATUS_FILE="/tmp/checks/pr-check-${kind}/status.txt"
+            if [ -f "$STATUS_FILE" ]; then
+              FOUND=$((FOUND+1))
+              # 单行读入，去掉可能的换行；表格里的 | 要转义，否则会撑破列
+              LINE=$(head -1 "$STATUS_FILE" | sed 's/|/\\|/g')
+              echo "| ${LABEL[$kind]} | ${LINE} |" >> "$OUT"
+            else
+              echo "| ${LABEL[$kind]} | ⚪ 未运行 |" >> "$OUT"
+            fi
+          done
+
+          if [ "$FOUND" -eq 0 ]; then
+            {
+              echo
+              echo "> 三项检查均未产出结果，请查看 [Actions 日志](${RUN_URL})。"
+            } >> "$OUT"
+          fi
+
+          # 详情逐个折叠，默认收起，避免一条评论刷满整个页面
+          for kind in $ORDER; do
+            BODY_FILE="/tmp/checks/pr-check-${kind}/body.md"
+            [ -f "$BODY_FILE" ] || continue
+            {
+              echo
+              echo "<details>"
+              echo "<summary><b>${LABEL[$kind]}详情</b></summary>"
+              echo
+              cat "$BODY_FILE"
+              echo
+              echo "</details>"
+            } >> "$OUT"
+          done
+
+          {
+            echo
+            echo "> 更新于 $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') · [Actions 日志](${RUN_URL})"
+          } >> "$OUT"
+
+          # upsert：按标记找到本工作流之前发的那条，有则改，无则新建
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"${MARKER}\"))] | .[0].id // empty")
+
+          jq -n --rawfile body "$OUT" '{body: $body}' > /tmp/payload.json
+
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${EXISTING}" --input /tmp/payload.json > /dev/null
+            echo "已更新汇总评论 #${EXISTING}"
+          else
+            gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/comments" --input /tmp/payload.json > /dev/null
+            echo "已创建汇总评论"
+          fi

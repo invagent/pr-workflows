@@ -13,6 +13,7 @@
 | `claude-alignment-review.yml` | PR 到 test 分支（仅 Java 项目） | 本体—PRD—代码全量一致性审查（18 维度），克隆本体仓库和数据库字典仓库做双向比对，输出结构化审查报告（PASS/PASS_WITH_RISKS/FAIL + 追溯矩阵 + Action 调用链），审查完成后云之家通知 PR 作者 |
 | `linear-fix-trigger.yml` | 由 ontology-review job 完成后串联调用（不可独立使用） | 读取 artifacts 仓库本体审核报告，有 🔴 严重问题则触发 Linear Fix-Pr |
 | `autotest-fix-trigger.yml` | 由 autotest job 成功后串联调用（不可独立使用） | 读取 artifacts 仓库端到端测试报告，通过率 < 阈值（默认 90%）则触发 Linear Fix-Bug |
+| `pr-summary.yml` | 由 pr-checks.yml 编排，在各检查 job 之后运行（不可独立使用） | 把多个检查的结果合并成**一条** PR 评论，重跑时原地更新而非新增 |
 | `claude.yml` | Issue 或 PR 评论中包含 `@claude` | AI 实时交互，支持代码解释、方案讨论等 |
 | `jenkins-deploy.yml` | push to test 分支 | 触发 Jenkins 部署构建并等待结果 |
 | `jenkins-autotest.yml` | 通常由 jenkins-deploy.yml 串联触发 | 触发 Jenkins 自动化测试并等待结果 |
@@ -60,6 +61,70 @@ Secrets 已在组织层面统一配置，子项目无需重复设置。如需使
 | `JENKINS_AUTOTEST_TOKEN` | 自动化测试流水线触发 Token |
 | `ARTIFACTS_REPO_TOKEN` | develop-workflow-artifacts 仓库读取 Token |
 | `LINEAR_TRIGGER_URL` | Linear Fix-Pr / Fix-Bug 触发接口地址 |
+
+### 推荐：统一编排，只发一条评论
+
+各检查工作流单独接入时会各发各的评论，PR 每 push 一次就多几条，很快淹没讨论。把它们编排进**同一个** `pr-checks.yml`，配合 `comment_mode: aggregated` 与 `pr-summary.yml`，PR 上就只有一条汇总评论，重跑时原地更新。
+
+> 为什么必须写在同一个文件里：GitHub Actions 的 job 只能在同一个 workflow 文件内互相 `needs`。分散在多个 workflow 文件时它们是彼此独立的 run，无法汇总。
+
+```yaml
+name: PR Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+# 同一 PR 连续 push 时取消在途运行：省算力，也避免评论被反复改写
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: invagent/pr-workflows/.github/workflows/maven-test.yml@master
+    with:
+      java_version: '17'
+      comment_mode: aggregated
+    secrets: inherit
+
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: invagent/pr-workflows/.github/workflows/claude-review.yml@master
+    with:
+      comment_mode: aggregated
+    secrets: inherit
+
+  # 变更影响分析最贵，只在真正要合进测试环境时才做
+  impact:
+    if: github.base_ref == 'test'
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    uses: invagent/pr-workflows/.github/workflows/claude-alignment-review.yml@master
+    with:
+      comment_mode: aggregated
+    secrets: inherit
+
+  # always()：某个检查失败或被跳过时，汇总照发，如实标注该项状态
+  summary:
+    needs: [test, review, impact]
+    if: always()
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    uses: invagent/pr-workflows/.github/workflows/pr-summary.yml@master
+```
+
+**`comment_mode` 说明**：所有检查工作流都支持这个入参，默认 `standalone`（自己发评论，单独接入时的原有行为，不传即保持不变）。设为 `aggregated` 时不发评论，改为上传名为 `pr-check-<kind>` 的 artifact，由 `pr-summary.yml` 收集。inline comment 在两种模式下都照常标注到代码行。
 
 ### 创建工作流文件
 

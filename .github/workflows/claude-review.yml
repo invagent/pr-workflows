@@ -3,6 +3,15 @@ name: Claude Auto Review
 
 on:
   workflow_call:           # 关键：声明这是可复用工作流
+    inputs:
+      comment_mode:
+        description: >-
+          结论怎么呈现。standalone：模型自己往 PR 发一条总结评论（默认，单独接入时用）；
+          aggregated：不发评论，写入文件并上传 pr-check-review artifact 交给 pr-summary 汇总。
+          两种模式下 inline comment 都照常标注
+        required: false
+        type: string
+        default: 'standalone'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -111,12 +120,43 @@ jobs:
             ## 公司代码规范
             ${{ steps.standards.outputs.hint }}
 
-            请用中文给出审查意见。对于具体代码问题，请使用 inline comment 标注到对应的代码行。
-            对于整体评价，使用 `gh pr comment` 添加总结性评论。
+            请用中文给出审查意见。具体代码问题用 inline comment 标注到对应的代码行。
 
-            **产出优先级**：先形成结论并用 `gh pr comment` 发出总结评论，再补充 inline comment。
+            ## 整体结论投递到哪（当前模式：${{ inputs.comment_mode }}）
+
+            - `standalone`：用 `gh pr comment` 发一条总结评论。
+            - `aggregated`：**不要发任何 PR 评论**，把总结写入 `/tmp/review-summary.md`。
+              该文件第一行固定为 `STATUS: <✅ 或 ⚠️ 或 ❌> 一句话结论`（例如
+              `STATUS: ✅ 建议合并 · 3 处非阻塞建议`），第二行起是正文。这一行会被
+              提取进汇总表格，务必简短。
+
+            两种模式下 inline comment 都照常标注。
+
+            **产出优先级**：先形成结论并按上述方式投递，再补充 inline comment。
             轮次有限，不要把预算全花在读文件上，避免最终没有任何产出。
 
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
             --max-turns 60
+
+      - name: Collect review result (aggregated mode)
+        if: always() && inputs.comment_mode == 'aggregated'
+        run: |
+          mkdir -p /tmp/pr-check-review
+          if [ -f /tmp/review-summary.md ]; then
+            # 首行是约定的状态摘要，剥掉 STATUS: 前缀进汇总表格；正文从第二行起
+            head -1 /tmp/review-summary.md | sed 's/^STATUS:[[:space:]]*//' > /tmp/pr-check-review/status.txt
+            tail -n +2 /tmp/review-summary.md > /tmp/pr-check-review/body.md
+          else
+            # 模型没写文件（轮次耗尽、异常中断等），汇总里要如实呈现而不是假装没这项检查
+            echo "⚠️ 未产出审查结论，请查看 Actions 日志" > /tmp/pr-check-review/status.txt
+            echo "审查步骤未生成 /tmp/review-summary.md。" > /tmp/pr-check-review/body.md
+          fi
+
+      - name: Publish check artifact (aggregated mode)
+        if: always() && inputs.comment_mode == 'aggregated'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-check-review
+          path: /tmp/pr-check-review
+          retention-days: 1
