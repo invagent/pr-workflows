@@ -164,6 +164,219 @@ jobs:
           echo "Changed files in this PR:"
           cat /tmp/pr-changed-files.txt
 
+      - name: Build review index (ontology shards + diff split + DB precheck)
+        id: review-index
+        if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
+        env:
+          ONTOLOGY_ROOT: ${{ steps.paths.outputs.ontology_root }}
+          DB_ROOT: ${{ steps.paths.outputs.db_mapping_root }}
+          BASE_REF: origin/${{ github.base_ref }}
+          OUT: /tmp
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          FEATURE_SCOPE: ${{ inputs.feature_scope }}
+        run: |
+          # 生成"审查索引"：把本体分片定位、diff 切分、数据库列预检等重活在 shell 里做完，
+          # 让 Claude 只读索引 + 按行号精读分片，避免全量扫本体导致轮次耗尽。
+          #
+          # 输入经 step env 注入：ONTOLOGY_ROOT / DB_ROOT / BASE_REF / OUT / PR_TITLE / FEATURE_SCOPE
+          # 产物：$OUT/review-brief.txt 及其中列出的各索引文件
+          set -uo pipefail
+
+          # ONTOLOGY_ROOT / DB_ROOT / BASE_REF / OUT / PR_TITLE / FEATURE_SCOPE 由 step env 注入
+
+          ID_RE='(OBJ|ACT|FN|PRO|LNK|STS|VS|RULE)-[A-Z][A-Z0-9]+(-[A-Z0-9]+)+'
+          MAX_PATCH_BYTES=350000
+
+          mkdir -p "$OUT"
+
+          # ---------- 1. 变更文件清单（按用途分类） ----------
+          git diff --name-only "$BASE_REF...HEAD" > "$OUT/pr-changed-files.txt" 2>/dev/null || true
+          grep -E '^src/main/' "$OUT/pr-changed-files.txt" > "$OUT/pr-main-files.txt" 2>/dev/null || true
+          grep -E '^src/test/' "$OUT/pr-changed-files.txt" > "$OUT/pr-test-files.txt" 2>/dev/null || true
+          touch "$OUT/pr-main-files.txt" "$OUT/pr-test-files.txt"
+
+          # ---------- 2. 主代码 diff（超限则截断并给出 stat 全貌） ----------
+          git diff "$BASE_REF...HEAD" -- 'src/main' 'pom.xml' > "$OUT/.main-diff.raw" 2>/dev/null || true
+          git diff --stat "$BASE_REF...HEAD" -- 'src' 'pom.xml' > "$OUT/pr-diff-stat.txt" 2>/dev/null || true
+          PATCH_BYTES=$(wc -c < "$OUT/.main-diff.raw" | tr -d ' ')
+          if [ "${PATCH_BYTES:-0}" -gt "$MAX_PATCH_BYTES" ]; then
+            {
+              echo "# TRUNCATED=true 原始 ${PATCH_BYTES} 字节，超过 ${MAX_PATCH_BYTES}，此处只含前 ${MAX_PATCH_BYTES} 字节"
+              echo "# 完整内容请按文件读 pr-diff/ 下的单文件 patch"
+              head -c "$MAX_PATCH_BYTES" "$OUT/.main-diff.raw"
+            } > "$OUT/pr-main-diff.patch"
+          else
+            { echo "# TRUNCATED=false 共 ${PATCH_BYTES} 字节"; cat "$OUT/.main-diff.raw"; } > "$OUT/pr-main-diff.patch"
+          fi
+
+          # ---------- 3. 按文件切分 diff，便于逐文件精读而不是整包吞 ----------
+          python3 - "$OUT" <<'PYSPLIT'
+          import os, re, sys
+
+          out = sys.argv[1]
+          shard_dir = os.path.join(out, "pr-diff")
+          os.makedirs(shard_dir, exist_ok=True)
+          for f in os.listdir(shard_dir):
+              os.remove(os.path.join(shard_dir, f))
+
+          raw_path = os.path.join(out, ".main-diff.raw")
+          raw = open(raw_path, encoding="utf-8", errors="replace").read() if os.path.exists(raw_path) else ""
+          blocks = re.split(r"(?m)^(?=diff --git )", raw)
+          index = []
+          for blk in blocks:
+              m = re.match(r"diff --git a/(\S+) b/(\S+)", blk)
+              if not m:
+                  continue
+              path = m.group(2)
+              flat = path.replace("/", "__") + ".patch"
+              with open(os.path.join(shard_dir, flat), "w", encoding="utf-8") as f:
+                  f.write(blk)
+              added = sum(1 for l in blk.splitlines() if l.startswith("+") and not l.startswith("+++"))
+              removed = sum(1 for l in blk.splitlines() if l.startswith("-") and not l.startswith("---"))
+              index.append((path, flat, added, removed, len(blk)))
+
+          index.sort(key=lambda x: -x[2])
+          with open(os.path.join(out, "pr-diff-files-index.txt"), "w", encoding="utf-8") as f:
+              f.write("# 主代码 diff 已按文件切分，按新增行数降序。看某文件改动直接读右侧 patch 路径，不要整包读 pr-main-diff.patch\n")
+              f.write("# 格式：+新增/-删除\t字节数\t源文件\t->\tpatch 文件\n")
+              for path, flat, added, removed, size in index:
+                  f.write("+%d/-%d\t%d\t%s\t->\t%s\n" % (added, removed, size, path, os.path.join(out, "pr-diff", flat)))
+          print("[diff-split] 切分 %d 个文件级 patch" % len(index))
+          PYSPLIT
+
+          # ---------- 4. 本次 PR 涉及的本体 ID（只取主代码新增行，去掉截断噪声） ----------
+          { git diff "$BASE_REF...HEAD" -- 'src/main' 2>/dev/null | grep -E '^\+' ; echo "$PR_TITLE $FEATURE_SCOPE"; } \
+            | grep -ohE "$ID_RE" | sort -u > "$OUT/.ids.raw" || true
+          sort -r "$OUT/.ids.raw" \
+            | awk '{ if (prev != "" && index(prev, $0) == 1) next; prev = $0; print }' \
+            | sort > "$OUT/pr-ontology-ids.txt"
+
+          # ---------- 5. 本体 ID → 文件:行号 分片索引 ----------
+          grep -rnoE "$ID_RE" --include='*.md' "$ONTOLOGY_ROOT" > "$OUT/.onto-ids.raw" 2>/dev/null || true
+
+          python3 - "$OUT" "$ONTOLOGY_ROOT" <<'PYINDEX'
+          import os, sys, collections
+
+          out, onto_root = sys.argv[1], sys.argv[2]
+          MAX_HITS_PER_ID = 6
+
+          pr_ids = [l.strip() for l in open(os.path.join(out, "pr-ontology-ids.txt"), encoding="utf-8") if l.strip()]
+          pr_set = set(pr_ids)
+
+          hits = collections.defaultdict(list)
+          raw = os.path.join(out, ".onto-ids.raw")
+          if os.path.exists(raw):
+              for line in open(raw, encoding="utf-8", errors="replace"):
+                  parts = line.rstrip("\n").split(":", 2)
+                  if len(parts) != 3:
+                      continue
+                  path, lineno, oid = parts
+                  if oid in pr_set:
+                      hits[oid].append((path, lineno))
+
+          with open(os.path.join(out, "ontology-id-index.txt"), "w", encoding="utf-8") as f:
+              f.write("# 本次 PR 涉及的本体 ID -> 本体文档位置（file:line）。\n")
+              f.write("# 用 grep -A7 '^## <ID>' 按需查询，禁止整读本文件，更禁止全量读本体文档。\n")
+              for oid in sorted(hits):
+                  locs = hits[oid]
+                  f.write("\n## %s  （命中 %d 处）\n" % (oid, len(locs)))
+                  for path, lineno in locs[:MAX_HITS_PER_ID]:
+                      f.write("%s:%s\n" % (path, lineno))
+                  if len(locs) > MAX_HITS_PER_ID:
+                      f.write("... 其余 %d 处省略\n" % (len(locs) - MAX_HITS_PER_ID))
+
+          missing = sorted(pr_set - set(hits))
+          with open(os.path.join(out, "ontology-ids-missing.txt"), "w", encoding="utf-8") as f:
+              f.write("# 主代码中出现、但本体文档检索不到的 ID —— MISSING_IN_ONTOLOGY 候选，需逐条确认是否为示例/拼写噪声\n")
+              for oid in missing:
+                  f.write(oid + "\n")
+
+          dirs = sorted({os.path.dirname(p) for locs in hits.values() for p, _ in locs})
+          with open(os.path.join(out, "ontology-shard-files.txt"), "w", encoding="utf-8") as f:
+              f.write("# 本次审查相关的本体分片（按目录分组）。补充上下文时只在这些文件里 grep，不要扩散到整个本体库。\n")
+              for d in dirs:
+                  f.write("\n## %s\n" % d)
+                  try:
+                      for name in sorted(os.listdir(d)):
+                          if name.endswith(".md"):
+                              full = os.path.join(d, name)
+                              f.write("%s  (%d bytes)\n" % (full, os.path.getsize(full)))
+                  except OSError:
+                      pass
+
+          print("[index] PR ID %d 个，本体命中 %d 个，未命中 %d 个，分片目录 %d 个"
+                % (len(pr_ids), len(hits), len(missing), len(dirs)))
+          PYINDEX
+
+          # ---------- 6. MyBatis mapper 列 × schema.json 预检 ----------
+          python3 - "$OUT" "$DB_ROOT" <<'PYDB'
+          import json, os, re, sys
+
+          out, db_root = sys.argv[1], sys.argv[2]
+          schema_path = os.path.join(db_root, "ssot", "schema", "schema.json")
+          report = open(os.path.join(out, "db-column-check.txt"), "w", encoding="utf-8")
+
+          changed = [l.strip() for l in open(os.path.join(out, "pr-changed-files.txt"), encoding="utf-8") if l.strip()]
+          xmls = [p for p in changed if p.endswith(".xml") and "/mapper/" in p and os.path.exists(p)]
+
+          if not os.path.exists(schema_path):
+              report.write("# schema.json 不存在（%s），跳过数据库列预检，DB 相关问题降级为软提示\n" % schema_path)
+              report.close()
+              print("[db-check] schema.json 缺失，跳过")
+              sys.exit(0)
+
+          schema = json.load(open(schema_path, encoding="utf-8"))
+          tables = {name: {c.get("name") for c in tbl.get("columns", [])}
+                    for name, tbl in schema.get("tables", {}).items()}
+
+          report.write("# MyBatis mapper 列名 x schema.json 预检（机器初筛，结论需模型复核：别名/函数列/未识别表会误报）\n")
+          report.write("# schema.json 表数：%d；本次变更 mapper XML：%d 个\n" % (len(tables), len(xmls)))
+
+          tbl_re = re.compile(r'\b(?:from|into|update|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)', re.I)
+          col_re = re.compile(r'column\s*=\s*"([^"]+)"')
+          suspect_total = 0
+
+          for xml in xmls:
+              text = open(xml, encoding="utf-8", errors="replace").read()
+              used_tables = sorted({t for t in tbl_re.findall(text) if t in tables})
+              cols = sorted(set(col_re.findall(text)))
+              known = set()
+              for t in used_tables:
+                  known |= tables[t]
+              suspects = [c for c in cols if c not in known]
+              suspect_total += len(suspects)
+              report.write("\n## %s\n" % xml)
+              report.write("命中表：%s\n" % (", ".join(used_tables) if used_tables else "（未识别到 schema 内的表，本文件结论不可信）"))
+              report.write("column 属性 %d 个，schema 内不存在 %d 个\n" % (len(cols), len(suspects)))
+              if suspects:
+                  report.write("疑似缺列：%s\n" % ", ".join(suspects))
+
+          report.close()
+          print("[db-check] 变更 mapper %d 个，疑似缺列 %d 个" % (len(xmls), suspect_total))
+          PYDB
+
+          # ---------- 7. 审查摘要（模型第一轮只需读这一个文件） ----------
+          MISSING_COUNT=$(( $(wc -l < "$OUT/ontology-ids-missing.txt" | tr -d ' ') - 1 ))
+          {
+            echo "# 审查索引摘要（下列路径均已就绪，可直接读）"
+            echo "变更文件总数：$(wc -l < "$OUT/pr-changed-files.txt" | tr -d ' ')"
+            echo "主代码文件数：$(wc -l < "$OUT/pr-main-files.txt" | tr -d ' ')   清单：$OUT/pr-main-files.txt"
+            echo "测试文件数：  $(wc -l < "$OUT/pr-test-files.txt" | tr -d ' ')   清单：$OUT/pr-test-files.txt"
+            echo "本体 ID 数：  $(wc -l < "$OUT/pr-ontology-ids.txt" | tr -d ' ')   清单：$OUT/pr-ontology-ids.txt"
+            echo "缺件候选数：  ${MISSING_COUNT}   清单：$OUT/ontology-ids-missing.txt"
+            echo ""
+            echo "索引文件："
+            echo "  $OUT/pr-diff-files-index.txt   按文件切分的 diff 索引（按新增行降序）"
+            echo "  $OUT/pr-diff/<flat>.patch      单文件 diff"
+            echo "  $OUT/ontology-id-index.txt     本体 ID -> 文档 file:line（用 grep -A7 '^## <ID>' 查，勿整读）"
+            echo "  $OUT/ontology-shard-files.txt  相关本体分片文件清单"
+            echo "  $OUT/db-column-check.txt       mapper 列 x schema.json 预检"
+            echo "  $OUT/pr-diff-stat.txt          整体 diff 规模"
+          } > "$OUT/review-brief.txt"
+          cat "$OUT/review-brief.txt"
+
+          rm -f "$OUT/.ids.raw" "$OUT/.onto-ids.raw" "$OUT/.main-diff.raw"
+
       - name: Claude Alignment Review
         id: claude-alignment-review
         if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
@@ -175,7 +388,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             你现在是"本体—PRD—代码一致性审计员"，对本次 Pull Request 做严格、双向、证据化审查。
-            此次任务只读：不要修改任何文件，不要把代码现状反向解释成正确本体，不要替缺失本体规则做猜测。
+            本任务只读：不要修改任何文件，不要把代码现状反向解释成正确本体，不要替缺失的本体规则做猜测。
 
             ## 基本信息
 
@@ -186,106 +399,77 @@ jobs:
             - BASE BRANCH: ${{ github.base_ref }}
             - FEATURE_SCOPE: ${{ inputs.feature_scope }}
 
-            ## 资料路径（已 checkout 到 runner 本地，直接用 Read/Glob/Grep 访问）
+            ## 已备好的审查索引（本次审查的唯一入口）
 
+            工作流已在 runner 上把"本体分片定位、diff 切分、数据库列预检"预处理完毕，**第一轮先读 `/tmp/review-brief.txt`**：
+
+            - `/tmp/review-brief.txt`            索引摘要与各文件路径（必读）
+            - `/tmp/pr-diff-files-index.txt`     主代码 diff 按文件切分的索引（按新增行降序）
+            - `/tmp/pr-diff/<flat>.patch`        单个文件的 diff
+            - `/tmp/pr-main-files.txt`           主代码变更清单
+            - `/tmp/pr-test-files.txt`           测试变更清单
+            - `/tmp/pr-ontology-ids.txt`         本次 PR 主代码涉及的本体 ID
+            - `/tmp/ontology-id-index.txt`       本体 ID → 本体文档 `file:line`（分片定位表）
+            - `/tmp/ontology-ids-missing.txt`    代码引用但本体检索不到的 ID（缺件候选）
+            - `/tmp/ontology-shard-files.txt`    本次相关的本体分片文件清单（同域兄弟文件）
+            - `/tmp/db-column-check.txt`         mapper 列 × schema.json 的机器初筛结果
+            - `/tmp/pr-diff-stat.txt`            整体 diff 规模
+
+            资料根目录（需要时才用）：
             - 本体根目录：`${{ steps.paths.outputs.ontology_root }}`
-            - 数据库字典目录：`${{ steps.paths.outputs.db_mapping_root }}`
-              - 总版字典：`${{ steps.paths.outputs.db_mapping_root }}/build/本体数据字典总版.md`（若存在）
-              - Schema：`${{ steps.paths.outputs.db_mapping_root }}/ssot/schema/schema.json`（若存在）
-            - 项目代码根目录：`.`（当前工作目录）
-            - 本次 PR 变更文件清单：`/tmp/pr-changed-files.txt`
+            - 数据库字典：`${{ steps.paths.outputs.db_mapping_root }}`（schema：`ssot/schema/schema.json`）
+            - 项目代码根目录：`.`
 
-            ## 执行步骤
+            ## 取证纪律（硬性，违反会导致轮次耗尽、审查失败）
 
-            ### Step 0：建立输入清单
+            1. **禁止全量读本体**。本体单文件常达 100–200KB，整读必然耗尽轮次。正确姿势：
+               `grep -A7 '^## <ID>' /tmp/ontology-id-index.txt` 拿到 `file:line` → `sed -n '<line-40>,<line+40>p' <file>` 读片段。
+               需要扩展上下文时，只在 `/tmp/ontology-shard-files.txt` 列出的文件内 grep，不要扩散到整个本体库。
+            2. **禁止整读 `/tmp/pr-main-diff.patch`**。按 `/tmp/pr-diff-files-index.txt` 逐文件读 `/tmp/pr-diff/*.patch`，优先新增行数最多的主代码文件；测试文件按需抽查。
+            3. **合并命令**。一次 Bash 调用里用 `;` 串起多条 grep/sed/cat，不要一条命令一次调用。
+            4. **轮次预算（总上限 120）**：≤70 轮完成取证；第 71 轮起停止取证、开始撰写结论；
+               **最迟第 100 轮必须完成 `gh pr comment` 与 `/tmp/alignment-review-report.md` 写盘**。
+               取证不完备也照常出报告，把没查到的项在报告中标注"未取证"——绝不允许因为没查完而不输出报告。
+            5. inline comment 最多 10 条，只标 🔴 / 🟡 问题；其余问题只写进报告表格。
 
-            先用 Read 读取 `/tmp/pr-changed-files.txt`，了解本次 PR 改动的文件范围。
-            如果 `FEATURE_SCOPE` 非空，以它为审查范围；否则从变更文件列表推断涉及的本体对象。
+            ## 审查步骤
 
-            用 Glob 探测以下路径，确认资料可用：
-            - `${{ steps.paths.outputs.ontology_root }}/**/*.md`（本体文档）
-            - `${{ steps.paths.outputs.db_mapping_root }}/build/*.md`（数据库总版字典）
-            - `${{ steps.paths.outputs.db_mapping_root }}/ssot/schema/schema.json`
+            ### Step 1　定范围（约 3 轮）
+            一次 Bash 读完 `/tmp/review-brief.txt`、`/tmp/ontology-ids-missing.txt`、`/tmp/ontology-shard-files.txt`、`/tmp/pr-diff-files-index.txt` 的头部，
+            确定本次涉及的本体域、核心 Action 与主要落地文件。`FEATURE_SCOPE` 非空时以它为准，否则以 PR 标题 + 主代码变更推断。
 
-            若本体目录下找不到任何 `.md` 文件，在 PR 留言说明"未找到本体资料，跳过审查"后结束。
+            ### Step 2　建立期望模型（按分片读本体）
+            对核心 `ACT-*` / `FN-*` / `STS-*` / `PRO-*` / `RULE-*` 按纪律 1 读分片，提取：
+            Guard、Effect、属性与 Link 写回、Side Effect、状态转换全集、Function 调用顺序、Rule 严重性与边界、`[DEP]` 标记。
 
-            ### Step 1：建立期望模型（读本体）
+            ### Step 3　建立代码模型（按分片读 diff）
+            按纪律 2 逐文件读 patch，追踪：入口 → 鉴权 → Handler → 事实加载 → Function/Rule → 状态与 Link 写回 → 外部调用/Event → 返回。
+            区分"存在但未调用""调用但结果未生效""只写了测试或注释""真实运行路径"。
 
-            按以下顺序读取本体文件（**Grep 优先，按需精读，不要全量读取**）：
+            ### Step 4　双向比对
+            **A. 本体 → 代码**：每个本体项是否有唯一、可执行、可测试的代码落点。
+            **B. 代码 → 本体**：每项业务行为是否有本体/PRD 依据，否则须标为 IMPLEMENTATION_ONLY。
 
-            ```
-            ObjectTypes.md / 域 README
-            → *_01_Properties.md + design-notes
-            → *_02_LinkTypes.md
-            → *_03_ValueSets.md
-            → *_04_ActionTypes.md
-            → *_05_Functions*.md + RulePackage
-            → VERSION.md
-            ```
+            #### 必查 8 项（每项都必须给出结论，作为覆盖率依据）
+            1. Action ↔ Handler 是否恰好一一对应，Guard / Effect / 属性与 Link 写回 / Side Effect 是否与本体一致
+            2. 状态机：`STS-*` 允许转换、终态保护、内部态与废弃态；代码里是否存在非法跃迁
+            3. Property：路径、类型、基数、必填、精度与舍入、不可变与派生口径；数据库落点以 `/tmp/db-column-check.txt` 为初筛线索
+               （**该文件是机器初筛，表名未识别或列别名会误报，必须核实 mapper 与 schema.json 后才写进报告**；确认列不存在 = 🔴，类型/精度偏差 = 🟡）
+            4. Function / Rule：canonical entry point 是否唯一，调用顺序是否等于文档，规则严重性是否被弱化、强化或遗漏
+            5. 缺件判定：逐条过 `/tmp/ontology-ids-missing.txt`，区分"本体真缺（MISSING_IN_ONTOLOGY，🔴 且必须在报告中单列）"与"示例值 / 拼写噪声"
+            6. 事务边界、幂等键、业务唯一键、乐观锁，外部调用与回调的重复及乱序处理、补偿路径
+            7. 分层与依赖方向：Entity / DTO / 框架类不得泄漏进 ontology、domain 包；跨对象修改须走对方 Action / Gateway / Event
+            8. 测试覆盖：允许与禁止的状态边、Function Ok/Err、Rule 边界、Handler 失败时零副作用、重复与乱序回调、持久化约束
 
-            提取：
-            - 范围内所有生效 Object Type 及主键、语义边界
-            - PRO-*：路径、类型、Cardinality、必填性、允许值、业务约束、是否派生/快照/不可变
-            - LNK-*：from/to、方向、基数、关系属性、写入拥有方
-            - STS-*：状态 code、初/中间/内部/终态、全部允许转换及对应 ACT-*
-            - ACT-*：输入、Guard、Profile applicability、Effect、属性/Link 写回、Side Effect
-            - FN-* / RULE-* / RulePackage：角色、输入、输出、规则严重性、调用顺序
-            - 标记所有 [DEP]、待补充、ID 重复、文档间矛盾
+            #### 条件触发 6 项（仅当 diff 命中对应线索时才查；不命中就不查，也不要写进报告）
+            - Link 一致性　　　→ diff 出现 `LNK-`，或有关联表写入
+            - Profile / RulePackage 路由　→ 出现 `Profile`、`selectProfile`、`RulePackage`
+            - 权限与数据范围　→ 出现 `@PreAuthorize`、`apiKey`、`tenant`、鉴权拦截器
+            - 审计与可观测　　→ 出现 `AuditLogger`、`TraceRecorder`、`Metrics`
+            - 跨对象写入　　　→ 出现对其它聚合的 Repository / Mapper 写操作
+            - `[DEP]` 复用　　→ 本体分片命中行含 `[DEP]`
 
-            如果提供了数据库字典，同步从 `build/本体数据字典总版.md` 查出各 PRO-* 的数据库落点（表名、列名、支撑度），无落点的记为 DB_UNMAPPED（软提示）。
-
-            ### Step 2：建立代码模型（读代码）
-
-            **Grep 优先，只读疑问文件**：
-
-            ```
-            Grep: "@OntologyObject\|@OntologyAction\|@OntologyFunction\|@OntologyProperty" in src/
-            Grep: "ACT-\|FN-\|PRO-\|LNK-\|STS-\|RULE-" in src/
-            Grep: "Handler" in src/main/java/**/handlers/
-            Grep: "interface.*Port" in src/main/java/**/ports/
-            Grep: "enum.*Status\|STS-" in src/main/java/
-            Grep: "TraceRecorder\|AuditLogger\|MetricsWriter" in src/main/java/**/handlers/
-            Grep: "ProfileSelectionRules\|selectProfile" in src/main/java/**/handlers/
-            ```
-
-            对 Grep 命中的可疑文件执行 Read，追踪：
-            - 入口 → 鉴权 → Handler → Facts load → Function/Rule → 状态/Link 写回 → 外部调用/Event → 返回
-            - 实际事务边界、乐观锁、业务唯一键、幂等键
-            - 区分"存在但未调用""调用但结果未生效""只写了测试/注释""真实运行路径"
-
-            如果数据库字典存在，同步用以下方式校验数据库落点：
-            ```
-            Grep: "@Column\|column=" in src/main/java/**/adapters/
-            Grep XML mapper: "column=\|property=" in src/main/resources/**/*.xml
-            ```
-            对照 `ssot/schema/schema.json` 中的列清单，列不存在于 schema 的为 P1 错误。
-
-            ### Step 3：双向逐项比对
-
-            **A. 本体 → 代码**：每个本体项是否存在唯一、可执行、可测试的代码落点。
-            **B. 代码 → 本体**：每项业务行为是否有本体/PRD 依据，或明确标为 IMPLEMENTATION_ONLY。
-
-            必须检查以下 18 个维度：
-            1. 对象边界和主键
-            2. 属性路径、类型、基数、必填/可选、精度/舍入、不可变和派生口径；若有数据库字典，校验 schema.json 中对应列是否存在（列不存在为 P1，类型/精度偏差为 P2）
-            3. Link 方向、基数、引用类型、关系属性、拥有方与数据库约束
-            4. ValueSet code、状态转换、终态保护、内部态和废弃态
-            5. Action 是否恰好一个 Handler，Guard/Effect/写回/Side Effect 是否一致
-            6. 是否把纯查询错误建成 Action，或绕过 Action 直接改本体对象
-            7. Function 是否有唯一 canonical entry point，输入/输出/角色/顺序是否一致
-            8. "需外查"函数是否使用同一事实快照后进入纯决策，纯函数是否混入 IO
-            9. Profile L1 路由是否唯一且穷尽，L2 plan、L3 能力和 RulePackage 是否匹配
-            10. RULE-* 是否保留严重性、字段引用和边界，是否有规则被弱化/强化/遗漏
-            11. 外部调用、轮询、回调、Outbox、幂等、事务、乐观锁和补偿
-            12. 跨对象修改是否通过对方 Action/Gateway/Event，而非直接写库
-            13. 权限是否覆盖 actor、action、object/data scope
-            14. Entity/DTO/框架是否泄漏进 ontology/domain
-            15. 审计是否能记录 ACT/FN/RULE/profile、前后状态和 correlation
-            16. 测试是否覆盖允许/禁止状态边、Function Ok/Err、Rule 边界、Handler 零副作用失败、重复/乱序回调和持久化约束
-            17. [DEP] ID 是否被新代码复用，生效 ID 是否重复映射
-            18. 文档中的 Action → Function 顺序是否等于真实调用顺序
-
-            ### Step 4：生成审查报告并输出评论
+            ## Step 5　生成审查报告并输出评论
 
             偏差分类（仅供内部判断，不在报告中展示）：
             - MISSING_IMPLEMENTATION / EXTRA_BEHAVIOR / SEMANTIC_MISMATCH / UNTRACEABLE
@@ -298,7 +482,7 @@ jobs:
             - 🔵 建议：追溯、命名、结构或非关键测试问题——可在后续 PR 处理
 
             **输出方式**：
-            1. 每个具体代码问题用 `mcp__github_inline_comment__create_inline_comment` 标注到对应代码行
+            1. 每个具体代码问题用 `mcp__github_inline_comment__create_inline_comment` 标注到对应代码行（上限 10 条）
             2. 整体报告用 `gh pr comment` 添加，格式严格如下（**不得添加其他章节**）：
 
             ```markdown
@@ -324,15 +508,14 @@ jobs:
             （**仅列 🔴 阻断和 🟡 警告**，🔵 建议不列。无阻断/警告时写"无需强制修复"）
             ```
 
-
             3. 写入 `/tmp/alignment-review-report.md`：
-               - 第一行必须是 `HAS_ISSUES`（有 P0/P1）或 `NO_ISSUES`
+               - 第一行必须是 `HAS_ISSUES`（有 🔴/🟡）或 `NO_ISSUES`
                - 第二行空行
                - 第三行起为完整报告正文
 
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash,Read,Glob,Grep,LS"
-            --max-turns 50
+            --max-turns 120
 
       - name: Save review report to artifacts repo
         if: steps.detect-java.outputs.is_java == 'true' && steps.paths.outputs.ontology_ok == 'true'
