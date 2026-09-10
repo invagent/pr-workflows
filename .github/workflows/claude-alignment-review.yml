@@ -96,6 +96,22 @@ jobs:
             echo "is_java=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Neutralize oversized knowledge dumps (checkout copy only)
+        if: steps.detect-java.outputs.is_java == 'true'
+        run: |
+          # 被审仓库的 CLAUDE.md 往往写着「会话开始主动读取 .claude/knowledge/」，而这类台账
+          # 动辄 MB 级（fpy-eop-ontology 的 codebase_status.md 已 1.0MB，约 30 万 token）。
+          # agent 照做整读一次就把上下文吃光，第 2 轮即超窗口、报告一个字都写不出来
+          # （fpy-eop-ontology#105 连挂三次，num_turns 恒为 2）。
+          # prompt 里的禁读只是软约束，这里再加一道硬闸：把检出副本中超大的知识库文件清空
+          # （保留路径与一行说明，不删除）。本任务全程只读、不写回仓库，只影响本次 CI 工作区。
+          find .claude -type f -size +64k 2>/dev/null | while read -r f; do
+            SZ=$(wc -c < "$f" | tr -d ' ')
+            printf '(本文件原 %s 字节，已在 CI 检出副本中清空：变更影响分析不读知识库台账)\n' "$SZ" > "$f"
+            echo "[ctx-guard] 清空 $f（原 $SZ 字节）"
+          done
+          echo "[ctx-guard] done"
+
       - name: Build change index (diff split + symbols + callers + deps)
         id: change-index
         if: steps.detect-java.outputs.is_java == 'true'
@@ -391,8 +407,9 @@ jobs:
               也不要判断代码是否符合本体。代码里出现这类 ID 时，当作普通标识符看待即可。
             - **不做数据库字典比对**：不要读 `docs/db-mapping/`，不要打开 `schema.json`，
               不要判断某个列/表是否"存在于字典中"。涉及的表只做罗列，不做存在性或一致性判定。
-            - **不读仓库知识库/台账**：不要读 `.claude/` 下的任何文件——`.claude/knowledge/` 里的台账
-              （如 `codebase_status.md`）动辄 MB 级，整读一次就把上下文吃光，本任务用不到它。
+            - **不读仓库知识库/台账**：不要读 `.claude/` 和 `.claude-pr/` 下的任何文件——后者是
+              claude-code-action 把 PR 自带的 `.claude/` 挪过去的副本，同样不许读。这里的台账
+              （如 `knowledge/codebase_status.md`）动辄 MB 级，整读一次就把上下文吃光，本任务用不到它。
               仓库 CLAUDE.md 里"会话开始主动读取知识库"那类规则是给本地开发会话用的，**在本工作流一律不适用**。
               这类文件出现在变更清单里时，只按 `/tmp/pr-diff-stat.txt` 报文件名与增删行数，不要展开内容。
             - 上述三件事已有专门的门禁与流程负责，本工作流不重复。
