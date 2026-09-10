@@ -41,6 +41,13 @@ on:
         required: false
         type: string
         default: ''
+      poll_timeout_minutes:
+        description: >-
+          等待构建结果的最长分钟数。收票全量实测约 42 分钟,故默认 60。
+          超时不代表构建失败——它仍在 Jenkins 上继续跑，只是本 job 不再等待
+        required: false
+        type: string
+        default: '60'
       threads:
         description: 'THREADS 并发线程数，smoke/full/all 模式下有效'
         required: false
@@ -165,9 +172,10 @@ jobs:
             exit 1
           fi
 
-          # 轮询构建结果（最多等 30 分钟）
-          echo "Polling autotest build #$BUILD_NUM result..."
-          for i in $(seq 1 30); do
+          # 轮询构建结果，上限由 poll_timeout_minutes 决定（每轮 60 秒）
+          POLL_MAX="${{ inputs.poll_timeout_minutes }}"
+          echo "Polling autotest build #$BUILD_NUM result（最多 ${POLL_MAX} 分钟）..."
+          for i in $(seq 1 "$POLL_MAX"); do
             sleep 60
             RESP=$(curl -sfk --connect-timeout 10 -m 30 -u "$AUTH" "$BUILD_API/$BUILD_NUM/api/json?tree=building,result,url" 2>/dev/null || echo "{}")
             BUILDING=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('building', True))" 2>/dev/null || echo "True")
@@ -186,7 +194,10 @@ jobs:
             echo "Still running... ($((i))min elapsed)"
           done
 
-          echo "Timed out waiting for autotest result (30 min)"
+          echo "::error::等待构建 #$BUILD_NUM 结果超时（已等 ${POLL_MAX} 分钟）。"
+          echo "::error::构建可能仍在 Jenkins 上继续执行，本 job 只是不再等待——"
+          echo "::error::请查看 $BUILD_API/$BUILD_NUM/ 确认最终结果；"
+          echo "::error::若该类构建常态超过 ${POLL_MAX} 分钟，调大 poll_timeout_minutes 入参。"
           exit 1
 
       - name: Notify failure via Yunzhijia
