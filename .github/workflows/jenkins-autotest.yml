@@ -4,29 +4,52 @@ name: Trigger Jenkins Autotest
 on:
   workflow_call:
     inputs:
+      # 以下入参对齐 at-automated-test 的实际参数定义，可用
+      # /job/at-automated-test/api/json?tree=property[parameterDefinitions[name,choices]] 查证
       run_mode:
-        description: 'Jenkins RUN_MODE 参数'
+        description: >-
+          RUN_MODE（选项参数）。收票：smoke 冒烟 / full 全量 / tax_full 税局下票 /
+          scenario 单场景（需 scenario_file）；开票：issue_invoice（再由 issue_mode 细分）；
+          国际开票：ipd_full / ipd_scenario；按接口回归：api_path（需 api_path 入参）
         required: true
         type: string
       issue_mode:
         description: >-
-          Jenkins ISSUE_MODE 参数。开票场景用（benti / debug 等），
-          收票场景（RUN_MODE=full）不需要，留空即以空串传入
+          ISSUE_MODE（选项参数，仅 run_mode=issue_invoice 时有效）：
+          smoke / all / specified / benti / scenario / debug。
+          留空则不传，由 Jenkins 用其默认值 —— 注意它的选项里没有空串，传空串会 HTTP 500
         required: false
         type: string
         default: ''
       issue_type:
-        description: 'Jenkins ISSUE_TYPE 参数。留空即以空串传入'
+        description: '【已废弃】at-automated-test 并无此参数，传了会被忽略。保留声明仅为兼容旧调用方'
+        required: false
+        type: string
+        default: ''
+      invoice_channel:
+        description: 'INVOICE_CHANNEL（选项参数，仅开票场景有效）：留空用 sit.yaml 默认通道 / leqi / rpa'
+        required: false
+        type: string
+        default: ''
+      scenario_file:
+        description: '单场景模式下的场景文件路径，如 scenarios/receive/done/xxx.yaml'
+        required: false
+        type: string
+        default: ''
+      api_path:
+        description: '接口 path 关键词，run_mode=api_path 时必填，多个用逗号分隔'
         required: false
         type: string
         default: ''
       threads:
-        description: 'Jenkins THREADS 参数'
+        description: 'THREADS 并发线程数，smoke/full/all 模式下有效'
         required: false
         type: string
         default: '4'
       issue_id:
-        description: 'Linear Issue ID，如 CNPRD-314，透传给 Jenkins ISSUE_ID 参数'
+        description: >-
+          Linear Issue ID，如 KNOPS-231，透传给 ISSUE_ID。
+          传入时 Jenkins 才生成 Markdown 报告并上传到 artifacts 仓库，留空则跳过报告
         required: false
         type: string
         default: ''
@@ -60,17 +83,25 @@ jobs:
           echo "Current build number before trigger: $BEFORE"
 
           # 触发构建
-          # ISSUE_MODE / ISSUE_TYPE 即使无值也要显式传空串（测试确认的用法）。
-          # 不能省略不传：Jenkins 参数化构建对未提供的参数会落到 job 自身的默认值上，
-          # 万一 ISSUE_MODE 默认是 benti，收票测试就会跑成开票模式。
-          # ISSUE_ID 例外 —— 它决定报告在 artifacts 仓库的归档目录，传空串会造出一个
-          # 空名目录，所以仍是有值才拼。
-          ISSUE_ID_PARAM=""
-          if [ -n "${{ inputs.issue_id }}" ]; then
-            ISSUE_ID_PARAM="&ISSUE_ID=${{ inputs.issue_id }}"
-          fi
+          # 只拼有值的参数。ISSUE_MODE 与 INVOICE_CHANNEL 是选项参数,
+          # 而 ISSUE_MODE 的选项里没有空串 —— 传 ISSUE_MODE= 会让 Jenkins 直接 HTTP 500。
+          # 未传的参数由 Jenkins 用 job 自身默认值(ISSUE_MODE 默认 smoke),
+          # 而它仅在 RUN_MODE=issue_invoice 时才生效,收票场景不传是安全的。
+          # ISSUE_TYPE 已废弃：该 job 的参数定义里没有这一项。
+          PARAMS="RUN_MODE=${{ inputs.run_mode }}&THREADS=${{ inputs.threads }}"
 
-          PARAMS="RUN_MODE=${{ inputs.run_mode }}&ISSUE_MODE=${{ inputs.issue_mode }}&ISSUE_TYPE=${{ inputs.issue_type }}&THREADS=${{ inputs.threads }}${ISSUE_ID_PARAM}"
+          append_if_set() {
+            # $1 参数名，$2 取值；空值则跳过，避免给选项参数传出非法值
+            if [ -n "$2" ]; then
+              PARAMS="${PARAMS}&$1=$2"
+            fi
+          }
+
+          append_if_set ISSUE_MODE      "${{ inputs.issue_mode }}"
+          append_if_set INVOICE_CHANNEL "${{ inputs.invoice_channel }}"
+          append_if_set SCENARIO_FILE   "${{ inputs.scenario_file }}"
+          append_if_set API_PATH        "${{ inputs.api_path }}"
+          append_if_set ISSUE_ID        "${{ inputs.issue_id }}"
 
           BUILD_URL="${BUILD_API}/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&${PARAMS}"
           echo "触发参数：${PARAMS}"
