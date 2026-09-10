@@ -51,7 +51,9 @@ jobs:
       - name: Trigger and wait for autotest build
         run: |
           AUTH="${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_API_TOKEN }}"
-          BUILD_API="${{ secrets.JENKINS_URL }}/cicd-job/at-automated-test"
+          # 路径段是 /job/ 而非 /cicd-job/ —— 后者实测 404，前者 200。
+          # JENKINS_URL 应配为 Jenkins 根地址（如 http://host:8080），不带 /job 后缀
+          BUILD_API="${{ secrets.JENKINS_URL }}/job/at-automated-test"
 
           # 触发前记录当前构建号
           BEFORE=$(curl -sf -u "$AUTH" "$BUILD_API/lastBuild/api/json?tree=number" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
@@ -73,7 +75,7 @@ jobs:
             OPTIONAL="${OPTIONAL}&ISSUE_ID=${{ inputs.issue_id }}"
           fi
 
-          BUILD_URL="${{ secrets.JENKINS_URL }}/cicd-job/at-automated-test/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&THREADS=${{ inputs.threads }}${OPTIONAL}"
+          BUILD_URL="${BUILD_API}/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&THREADS=${{ inputs.threads }}${OPTIONAL}"
           echo "触发参数：RUN_MODE=${{ inputs.run_mode }} THREADS=${{ inputs.threads }}${OPTIONAL}"
 
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -u "$AUTH" "$BUILD_URL")
