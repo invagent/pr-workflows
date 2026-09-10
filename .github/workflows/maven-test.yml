@@ -113,7 +113,9 @@ jobs:
           if [ -z "$DIFF_COVERAGE" ]; then
             DIFF_COVERAGE=$(grep -oP '\d+(\.\d+)?(?=%)' /tmp/diff-cover-report.md 2>/dev/null | tail -1 || true)
           fi
-          [ -z "$DIFF_COVERAGE" ] && DIFF_COVERAGE="N/A"
+          if [ -z "$DIFF_COVERAGE" ]; then
+            DIFF_COVERAGE="N/A"
+          fi
           echo "diff_coverage=$DIFF_COVERAGE" >> "$GITHUB_OUTPUT"
 
           # 读取报告内容供后续评论使用

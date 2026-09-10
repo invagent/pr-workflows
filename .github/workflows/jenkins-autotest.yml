@@ -9,13 +9,17 @@ on:
         required: true
         type: string
       issue_mode:
-        description: 'Jenkins ISSUE_MODE 参数'
-        required: true
+        description: >-
+          Jenkins ISSUE_MODE 参数。开票场景用（benti / debug 等），
+          收票场景（RUN_MODE=full）不需要，留空则不拼进请求
+        required: false
         type: string
+        default: ''
       issue_type:
-        description: 'Jenkins ISSUE_TYPE 参数'
-        required: true
+        description: 'Jenkins ISSUE_TYPE 参数。留空则不拼进请求'
+        required: false
         type: string
+        default: ''
       threads:
         description: 'Jenkins THREADS 参数'
         required: false
@@ -54,13 +58,25 @@ jobs:
           echo "Current build number before trigger: $BEFORE"
 
           # 触发构建
-          ISSUE_ID_PARAM=""
-          if [ -n "${{ inputs.issue_id }}" ]; then
-            ISSUE_ID_PARAM="&ISSUE_ID=${{ inputs.issue_id }}"
+          # 可选参数留空就不拼：收票场景（RUN_MODE=full）不吃 ISSUE_MODE / ISSUE_TYPE，
+          # 硬塞空值可能让 Jenkins 用空串覆盖 job 自身的默认值
+          # 用 if 而不是 [ -n x ] && y：Actions 的 bash 带 -e，条件为假时后者会让整个
+          # 复合命令返回非 0 从而终止脚本 —— 收票场景 issue_mode 本来就是空的
+          OPTIONAL=""
+          if [ -n "${{ inputs.issue_mode }}" ]; then
+            OPTIONAL="${OPTIONAL}&ISSUE_MODE=${{ inputs.issue_mode }}"
           fi
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST -u "$AUTH" \
-            "${{ secrets.JENKINS_URL }}/cicd-job/at-automated-test/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&ISSUE_MODE=${{ inputs.issue_mode }}&ISSUE_TYPE=${{ inputs.issue_type }}&THREADS=${{ inputs.threads }}${ISSUE_ID_PARAM}")
+          if [ -n "${{ inputs.issue_type }}" ]; then
+            OPTIONAL="${OPTIONAL}&ISSUE_TYPE=${{ inputs.issue_type }}"
+          fi
+          if [ -n "${{ inputs.issue_id }}" ]; then
+            OPTIONAL="${OPTIONAL}&ISSUE_ID=${{ inputs.issue_id }}"
+          fi
+
+          BUILD_URL="${{ secrets.JENKINS_URL }}/cicd-job/at-automated-test/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&THREADS=${{ inputs.threads }}${OPTIONAL}"
+          echo "触发参数：RUN_MODE=${{ inputs.run_mode }} THREADS=${{ inputs.threads }}${OPTIONAL}"
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -u "$AUTH" "$BUILD_URL")
 
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo "Failed to trigger autotest build (HTTP $HTTP_CODE)"

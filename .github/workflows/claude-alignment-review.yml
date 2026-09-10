@@ -652,8 +652,11 @@ jobs:
           FIRST=$(head -1 "$REPORT" | tr -d '\r')
           RISK_LINE=$(grep -m1 '风险：' "$REPORT" | sed 's/^[[:space:]]*-[[:space:]]*风险：//' || true)
 
+          # 用 if：Actions 的 bash 带 -e，NO_RISKS 时短路写法会让脚本在这里终止
           ICON="✅"
-          [ "$FIRST" = "HAS_RISKS" ] && ICON="🟡"
+          if [ "$FIRST" = "HAS_RISKS" ]; then
+            ICON="🟡"
+          fi
 
           echo "${ICON} ${RISK_LINE:-已完成}" > /tmp/pr-check-impact/status.txt
 
