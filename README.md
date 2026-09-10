@@ -355,9 +355,15 @@ jobs:
       linear_id: ${{ steps.extract.outputs.linear_id }}
     steps:
       - id: extract
+        env:
+          # 必须经 env 传入，不要在脚本里内联 ${{ }}：提交信息是任何能 push 的人
+          # 可控的输入，含 $(...)、反引号或换行时会断开脚本甚至执行任意命令
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          LINEAR_ID=$(echo "${{ github.ref_name }} ${{ github.event.head_commit.message }}" \
-            | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
+          # 只取提交信息首行：多行信息里的换行会让匹配范围失控
+          LINEAR_ID=$(printf '%s %s' "$REF_NAME" "$(echo "$COMMIT_MSG" | head -1)" \
+            | grep -oiE '[A-Z]{2,8}-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]' || true)
           echo "linear_id=${LINEAR_ID}" >> "$GITHUB_OUTPUT"
 
   deploy:

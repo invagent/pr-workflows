@@ -32,8 +32,13 @@ jobs:
     steps:
       - name: Extract Linear Issue ID
         id: extract-id
+        env:
+          # 经 env 传入而非脚本内联：这两个入参来自 PR 标题与分支名，属用户可控输入，
+          # 直接插值时含 $(...)、反引号或换行的值会断开脚本，甚至执行任意命令
+          PR_TITLE: ${{ inputs.pr_title }}
+          PR_HEAD_REF: ${{ inputs.pr_head_ref }}
         run: |
-          LINEAR_ID=$(echo "${{ inputs.pr_title }} ${{ inputs.pr_head_ref }}" \
+          LINEAR_ID=$(echo "$PR_TITLE $PR_HEAD_REF" \
             | grep -oiE '[A-Z]+-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]')
 
           if [ -z "$LINEAR_ID" ]; then
