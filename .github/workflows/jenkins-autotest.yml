@@ -11,12 +11,12 @@ on:
       issue_mode:
         description: >-
           Jenkins ISSUE_MODE 参数。开票场景用（benti / debug 等），
-          收票场景（RUN_MODE=full）不需要，留空则不拼进请求
+          收票场景（RUN_MODE=full）不需要，留空即以空串传入
         required: false
         type: string
         default: ''
       issue_type:
-        description: 'Jenkins ISSUE_TYPE 参数。留空则不拼进请求'
+        description: 'Jenkins ISSUE_TYPE 参数。留空即以空串传入'
         required: false
         type: string
         default: ''
@@ -60,23 +60,20 @@ jobs:
           echo "Current build number before trigger: $BEFORE"
 
           # 触发构建
-          # 可选参数留空就不拼：收票场景（RUN_MODE=full）不吃 ISSUE_MODE / ISSUE_TYPE，
-          # 硬塞空值可能让 Jenkins 用空串覆盖 job 自身的默认值
-          # 用 if 而不是 [ -n x ] && y：Actions 的 bash 带 -e，条件为假时后者会让整个
-          # 复合命令返回非 0 从而终止脚本 —— 收票场景 issue_mode 本来就是空的
-          OPTIONAL=""
-          if [ -n "${{ inputs.issue_mode }}" ]; then
-            OPTIONAL="${OPTIONAL}&ISSUE_MODE=${{ inputs.issue_mode }}"
-          fi
-          if [ -n "${{ inputs.issue_type }}" ]; then
-            OPTIONAL="${OPTIONAL}&ISSUE_TYPE=${{ inputs.issue_type }}"
-          fi
+          # ISSUE_MODE / ISSUE_TYPE 即使无值也要显式传空串（测试确认的用法）。
+          # 不能省略不传：Jenkins 参数化构建对未提供的参数会落到 job 自身的默认值上，
+          # 万一 ISSUE_MODE 默认是 benti，收票测试就会跑成开票模式。
+          # ISSUE_ID 例外 —— 它决定报告在 artifacts 仓库的归档目录，传空串会造出一个
+          # 空名目录，所以仍是有值才拼。
+          ISSUE_ID_PARAM=""
           if [ -n "${{ inputs.issue_id }}" ]; then
-            OPTIONAL="${OPTIONAL}&ISSUE_ID=${{ inputs.issue_id }}"
+            ISSUE_ID_PARAM="&ISSUE_ID=${{ inputs.issue_id }}"
           fi
 
-          BUILD_URL="${BUILD_API}/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&RUN_MODE=${{ inputs.run_mode }}&THREADS=${{ inputs.threads }}${OPTIONAL}"
-          echo "触发参数：RUN_MODE=${{ inputs.run_mode }} THREADS=${{ inputs.threads }}${OPTIONAL}"
+          PARAMS="RUN_MODE=${{ inputs.run_mode }}&ISSUE_MODE=${{ inputs.issue_mode }}&ISSUE_TYPE=${{ inputs.issue_type }}&THREADS=${{ inputs.threads }}${ISSUE_ID_PARAM}"
+
+          BUILD_URL="${BUILD_API}/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&${PARAMS}"
+          echo "触发参数：${PARAMS}"
 
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -u "$AUTH" "$BUILD_URL")
 
