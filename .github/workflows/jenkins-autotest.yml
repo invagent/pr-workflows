@@ -82,13 +82,19 @@ jobs:
           # curl 一律加超时：GitHub runner 到内网 Jenkins 若被防火墙丢包，
           # 不带超时的 curl 会挂到 TCP 默认超时（约 2 分钟）才返回，且只留一个
           # exit 28 —— 排查时看不出是网络不通还是接口报错。
+          # 用 curl 的退出码判断连通性，不要拿 || echo 拼标记 —— curl 已经输出了
+          # 状态码，标记会被追加成 "000CURL_FAILED" 之类，反而让判断落到错误分支
+          set +e
           PROBE=$(curl -s --connect-timeout 10 -m 30 -w '\n%{http_code}' -u "$AUTH" \
-            "$BUILD_API/lastBuild/api/json?tree=number" || echo "CURL_FAILED")
+            "$BUILD_API/lastBuild/api/json?tree=number")
+          CURL_RC=$?
+          set -e
           PROBE_CODE=$(echo "$PROBE" | tail -1)
 
-          if [ "$PROBE" = "CURL_FAILED" ] || [ "$PROBE_CODE" = "000" ] || [ -z "$PROBE_CODE" ]; then
-            echo "::error::连不上 Jenkins（$BUILD_API）。GitHub runner 需要能从公网访问该地址,"
-            echo "::error::请确认 JENKINS_URL 指向 runner 可达的入口,而不是仅内网可达的地址。"
+          if [ "$CURL_RC" -ne 0 ] || [ "$PROBE_CODE" = "000" ] || [ -z "$PROBE_CODE" ]; then
+            echo "::error::连不上 Jenkins（curl 退出码 $CURL_RC，HTTP $PROBE_CODE）。"
+            echo "::error::退出码 28 为连接超时,通常是 GitHub runner 到该地址被防火墙丢包。"
+            echo "::error::请确认 JENKINS_URL 指向 GitHub runner 可达的入口,而非仅内网可达的地址。"
             exit 1
           fi
           if [ "$PROBE_CODE" != "200" ]; then
