@@ -79,7 +79,24 @@ jobs:
           BUILD_API="${{ secrets.JENKINS_URL }}/job/at-automated-test"
 
           # 触发前记录当前构建号
-          BEFORE=$(curl -sf -u "$AUTH" "$BUILD_API/lastBuild/api/json?tree=number" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
+          # curl 一律加超时：GitHub runner 到内网 Jenkins 若被防火墙丢包，
+          # 不带超时的 curl 会挂到 TCP 默认超时（约 2 分钟）才返回，且只留一个
+          # exit 28 —— 排查时看不出是网络不通还是接口报错。
+          PROBE=$(curl -s --connect-timeout 10 -m 30 -w '\n%{http_code}' -u "$AUTH" \
+            "$BUILD_API/lastBuild/api/json?tree=number" || echo "CURL_FAILED")
+          PROBE_CODE=$(echo "$PROBE" | tail -1)
+
+          if [ "$PROBE" = "CURL_FAILED" ] || [ "$PROBE_CODE" = "000" ] || [ -z "$PROBE_CODE" ]; then
+            echo "::error::连不上 Jenkins（$BUILD_API）。GitHub runner 需要能从公网访问该地址,"
+            echo "::error::请确认 JENKINS_URL 指向 runner 可达的入口,而不是仅内网可达的地址。"
+            exit 1
+          fi
+          if [ "$PROBE_CODE" != "200" ]; then
+            echo "::error::读取构建号返回 HTTP $PROBE_CODE —— 路径或凭据有问题：$BUILD_API/lastBuild/api/json"
+            exit 1
+          fi
+
+          BEFORE=$(echo "$PROBE" | sed '$d' | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
           echo "Current build number before trigger: $BEFORE"
 
           # 触发构建
@@ -106,10 +123,18 @@ jobs:
           BUILD_URL="${BUILD_API}/buildWithParameters?token=${{ secrets.JENKINS_AUTOTEST_TOKEN }}&${PARAMS}"
           echo "触发参数：${PARAMS}"
 
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -u "$AUTH" "$BUILD_URL")
+          HTTP_CODE=$(curl -s -o /dev/null --connect-timeout 10 -m 60 -w "%{http_code}" \
+            -X POST -u "$AUTH" "$BUILD_URL" || echo "000")
 
+          # 兜住空值与 000：直接拿去做 [ -lt ] 比较会因非整数而报语法错退出,
+          # 那样日志里只剩一个 exit code,看不出到底发生了什么
+          if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
+            echo "::error::触发请求未得到响应（连接超时或被拒绝）：$BUILD_API"
+            exit 1
+          fi
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "Failed to trigger autotest build (HTTP $HTTP_CODE)"
+            echo "::error::触发 autotest 构建失败（HTTP $HTTP_CODE）。500 多为参数取值非法,"
+            echo "::error::可用 api/json?tree=property[parameterDefinitions[name,choices]] 核对选项参数"
             exit 1
           fi
           echo "Autotest build triggered (HTTP $HTTP_CODE), waiting for build to start..."
@@ -118,7 +143,7 @@ jobs:
           BUILD_NUM=""
           for i in $(seq 1 12); do
             sleep 10
-            CURRENT=$(curl -sf -u "$AUTH" "$BUILD_API/lastBuild/api/json?tree=number" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
+            CURRENT=$(curl -sf --connect-timeout 10 -m 30 -u "$AUTH" "$BUILD_API/lastBuild/api/json?tree=number" | python3 -c "import sys,json; print(json.load(sys.stdin).get('number', 0))" 2>/dev/null || echo "0")
             if [ "$CURRENT" -gt "$BEFORE" ]; then
               BUILD_NUM=$CURRENT
               echo "Autotest build #$BUILD_NUM started"
@@ -135,7 +160,7 @@ jobs:
           echo "Polling autotest build #$BUILD_NUM result..."
           for i in $(seq 1 30); do
             sleep 60
-            RESP=$(curl -sf -u "$AUTH" "$BUILD_API/$BUILD_NUM/api/json?tree=building,result,url" 2>/dev/null || echo "{}")
+            RESP=$(curl -sf --connect-timeout 10 -m 30 -u "$AUTH" "$BUILD_API/$BUILD_NUM/api/json?tree=building,result,url" 2>/dev/null || echo "{}")
             BUILDING=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('building', True))" 2>/dev/null || echo "True")
             RESULT=$(echo "$RESP"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('result', ''))"  2>/dev/null || echo "")
             URL=$(echo "$RESP"     | python3 -c "import sys,json; print(json.load(sys.stdin).get('url', ''))"     2>/dev/null || echo "")
