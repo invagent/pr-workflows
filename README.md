@@ -54,7 +54,7 @@ Secrets 已在组织层面统一配置，子项目无需重复设置。如需使
 | `YUNZHIJIA_ACCESS_TOKEN` | 云之家通知 Token |
 | `ONTOLOGY_MCP_URL` | ontology-mcp 服务地址（claude-ontology-review.yml 必需） |
 | `ONTOLOGY_MCP_TOKEN` | ontology-mcp 认证 Token（claude-ontology-review.yml 必需） |
-| `JENKINS_URL` | Jenkins 代理地址 |
+| `JENKINS_URL` | Jenkins 网关地址，必须填 **`https://170.106.141.117`**（见下方说明） |
 | `JENKINS_USER` | Jenkins 用户名 |
 | `JENKINS_API_TOKEN` | Jenkins API Token |
 | `JENKINS_PIPELINE_TOKEN` | 部署流水线触发 Token |
@@ -125,6 +125,30 @@ jobs:
 ```
 
 **`comment_mode` 说明**：所有检查工作流都支持这个入参，默认 `standalone`（自己发评论，单独接入时的原有行为，不传即保持不变）。设为 `aggregated` 时不发评论，改为上传名为 `pr-check-<kind>` 的 artifact，由 `pr-summary.yml` 收集。inline comment 在两种模式下都照常标注到代码行。
+
+### Jenkins 网关（触发构建与自动化测试必读）
+
+内网 Jenkins（`jump-test.piaozone.com:8080`）不对公网开放，GitHub runner 只能经
+`170.106.141.117` 上的 nginx 网关访问，它把 `/cicd-job/` 转发到内网的 `/job/`：
+
+```nginx
+location /cicd-job/ {
+    proxy_pass http://jump-test.piaozone.com:8080/job/;
+    proxy_set_header Host jump-test.piaozone.com;
+}
+```
+
+因此有三条硬性约束：
+
+1. **`JENKINS_URL` 必须是 `https://170.106.141.117`**，不要填内网地址——runner 连不上，
+   表现为 curl 退出码 28、卡满 TCP 超时后失败。
+2. **必须走 https（443）**。该机器 80 端口被另一个 server 块（`server_name` 精确匹配
+   IP，优先级高于网关的 `server_name _`）接管，网关的 location 在 80 上不生效，
+   请求会被当静态文件查找并返回 404 / 502。443 只有网关监听，故可用。
+3. **路径段是 `/cicd-job/`**，不是 `/job/`。网关证书为自签，工作流内的 curl 均带 `-k`。
+
+同一台机器上的 `/ontology-mcp/`、`/linear-cc/` 也在这个网关里，
+`ONTOLOGY_MCP_URL` 与 `LINEAR_TRIGGER_URL` 同样要用 https 才能命中。
 
 ### 创建工作流文件
 
